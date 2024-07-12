@@ -5,7 +5,7 @@ use std::{
 
 use libc::{
     atexit, tcgetattr, tcsetattr, termios, BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG,
-    ISTRIP, IXON, OPOST, STDIN_FILENO, TCSAFLUSH,
+    ISTRIP, IXON, OPOST, STDIN_FILENO, TCSAFLUSH, VMIN, VTIME,
 };
 
 static mut ORIG_TERMIOS: termios = unsafe { mem::zeroed() };
@@ -44,6 +44,12 @@ fn enable_raw_mode() {
         // IEXTEN - Enable implementation-defined input processing (turning off stops discarding Ctrl+V, Ctrl+O etc.)
         raw.c_lflag &= !(ECHO | ICANON | ISIG | IEXTEN);
 
+        // Control Characters:
+        // VMIN - sets min. no. of bytes of input needed before read can return
+        // VTIME - sets max. amount of time to wait to before read returns
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 1;
+
         // TCSAFLUSH - change occurs after all output has been transmitted &
         // all input that has been received but not read will be discarded before the change is made
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
@@ -53,13 +59,10 @@ fn enable_raw_mode() {
 fn main() {
     enable_raw_mode();
 
-    let mut buf = [0; 1];
-
-    while let Ok(_) = io::stdin().read_exact(&mut buf) {
+    loop {
+        let mut buf = [0; 1];
+        let _ = io::stdin().read_exact(&mut buf);
         let c = char::from(buf[0]);
-        if c == 'q' {
-            break;
-        }
 
         if c.is_control() {
             print!("{}\r\n", c as u32);
@@ -67,5 +70,9 @@ fn main() {
             print!("{} ('{}')\r\n", c as u32, c)
         }
         io::stdout().flush().unwrap();
+
+        if c == 'q' {
+            break;
+        }
     }
 }
