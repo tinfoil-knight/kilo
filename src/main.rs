@@ -74,6 +74,20 @@ fn enable_raw_mode() -> io::Result<()> {
     Ok(())
 }
 
+fn editor_read_key() -> char {
+    let mut buf = [0; 1];
+    let _ = io::stdin().read_exact(&mut buf);
+    char::from(buf[0])
+}
+
+fn editor_process_keypress() {
+    let c = editor_read_key();
+
+    if (c as u8) == ctrl_key('q') {
+        exit(0);
+    }
+}
+
 fn main() {
     if let Err(e) = enable_raw_mode() {
         eprintln!("Failed to enable raw mode: {}", e);
@@ -81,19 +95,6 @@ fn main() {
     };
 
     loop {
-        let mut buf = [0; 1];
-        let _ = io::stdin().read_exact(&mut buf);
-        let c = char::from(buf[0]);
-
-        if c.is_control() {
-            print!("{}\r\n", c as u32);
-        } else {
-            print!("{} ('{}')\r\n", c as u32, c)
-        }
-        io::stdout().flush().unwrap();
-
-        if c as u8 == ctrl_key('q') {
-            break;
-        }
+        editor_process_keypress();
     }
 }
