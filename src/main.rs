@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    io::{self, Read},
+    io::{self, Read, Write},
     mem,
     process::exit,
 };
@@ -22,6 +22,8 @@ static mut ORIG_TERMIOS: termios = unsafe { mem::zeroed() };
 // terminal
 
 fn die<E: Display>(message: &str, error: E) -> ! {
+    editor_clear_screen();
+
     eprintln!("{} : {}", message, error);
     exit(1);
 }
@@ -83,8 +85,46 @@ fn enable_raw_mode() -> io::Result<()> {
 
 fn editor_read_key() -> char {
     let mut buf = [0; 1];
-    let _ = io::stdin().read_exact(&mut buf);
+
+    while let Err(e) = io::stdin().read_exact(&mut buf) {
+        if e.kind() != io::ErrorKind::UnexpectedEof {
+            die("Failed to read from stdin", e);
+        }
+    }
+
     char::from(buf[0])
+}
+
+// output
+
+fn editor_clear_screen() {
+    // x1b -> 27 in decimal -> Ctrl + [ or <Esc> is an escape sequence.
+
+    // J command - Erase in Display (clear the screen)
+    // 2 is an argument to the J command that means "clear the entire screen".
+    print!("\x1b[2J");
+    // H command - Position the cursor.
+    // Default argument are 1,1 (row no., col no.).
+    // Note: Rows and Columns are numbered starting at 1 and not 0.
+    print!("\x1b[H");
+    io::stdout().flush().unwrap();
+}
+
+fn editor_draw_rows() {
+    for _ in 0..24 {
+        print!("~\r\n");
+    }
+}
+
+fn editor_refresh_screen() {
+    print!("\x1b[2J");
+    print!("\x1b[H");
+
+    editor_draw_rows();
+
+    print!("\x1b[H");
+
+    io::stdout().flush().unwrap();
 }
 
 // input
@@ -93,6 +133,7 @@ fn editor_process_keypress() {
     let c = editor_read_key();
 
     if (c as u8) == ctrl_key('q') {
+        editor_clear_screen();
         exit(0);
     }
 }
@@ -105,6 +146,7 @@ fn main() {
     };
 
     loop {
+        editor_refresh_screen();
         editor_process_keypress();
     }
 }
