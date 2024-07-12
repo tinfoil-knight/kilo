@@ -1,6 +1,7 @@
 use std::{
     io::{self, Read, Write},
     mem,
+    process::exit,
 };
 
 use libc::{
@@ -12,15 +13,22 @@ static mut ORIG_TERMIOS: termios = unsafe { mem::zeroed() };
 
 extern "C" fn disable_raw_mode() {
     unsafe {
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &ORIG_TERMIOS);
+        if tcsetattr(STDIN_FILENO, TCSAFLUSH, &ORIG_TERMIOS) != 0 {
+            eprintln!("Failed to disable raw mode: {}", io::Error::last_os_error());
+            exit(1);
+        };
     }
 }
 
-fn enable_raw_mode() {
+fn enable_raw_mode() -> io::Result<()> {
     // Ref: https://www.man7.org/linux/man-pages/man3/termios.3.html
     unsafe {
-        tcgetattr(STDIN_FILENO, &mut ORIG_TERMIOS);
-        atexit(disable_raw_mode);
+        if tcgetattr(STDIN_FILENO, &mut ORIG_TERMIOS) != 0 {
+            return Err(io::Error::last_os_error());
+        };
+        if atexit(disable_raw_mode) != 0 {
+            return Err(io::Error::last_os_error());
+        };
         let mut raw = ORIG_TERMIOS.clone();
 
         // Input Flags:
@@ -52,12 +60,18 @@ fn enable_raw_mode() {
 
         // TCSAFLUSH - change occurs after all output has been transmitted &
         // all input that has been received but not read will be discarded before the change is made
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+        if tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0 {
+            return Err(io::Error::last_os_error());
+        };
     }
+    Ok(())
 }
 
 fn main() {
-    enable_raw_mode();
+    if let Err(e) = enable_raw_mode() {
+        eprintln!("Failed to enable raw mode: {}", e);
+        exit(1)
+    };
 
     loop {
         let mut buf = [0; 1];
