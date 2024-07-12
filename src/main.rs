@@ -9,6 +9,13 @@ use libc::{
     ISTRIP, IXON, OPOST, STDIN_FILENO, TCSAFLUSH, VMIN, VTIME,
 };
 
+const fn ctrl_key(k: char) -> u8 {
+    // when you press Ctrl in combination w/ other key in the terminal
+    // a modified character is sent w/ bits 5 and 6 stripped (set to '0')
+    // in the character corresponding to the key pressed
+    (k as u8) & 0x1f
+}
+
 static mut ORIG_TERMIOS: termios = unsafe { mem::zeroed() };
 
 extern "C" fn disable_raw_mode() {
@@ -85,7 +92,7 @@ fn main() {
         }
         io::stdout().flush().unwrap();
 
-        if c == 'q' {
+        if c as u8 == ctrl_key('q') {
             break;
         }
     }
