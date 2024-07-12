@@ -26,13 +26,18 @@ fn enable_raw_mode() {
 fn main() {
     enable_raw_mode();
 
-    let mut c = [0; 1];
+    let mut buf = [0; 1];
 
-    while let Ok(_) = io::stdin().read_exact(&mut c) {
-        if &c == b"q" {
+    while let Ok(_) = io::stdin().read_exact(&mut buf) {
+        let c = char::from(buf[0]);
+        if c == 'q' {
             break;
         }
-        print!("{}", String::from_utf8_lossy(&c));
+        if c.is_control() {
+            print!("{}\n", c as u32);
+        } else {
+            print!("{} ('{}')\n", c as u32, c)
+        }
         io::stdout().flush().unwrap();
     }
 }
