@@ -1,9 +1,9 @@
 use std::{
-    io::{self, Read},
+    io::{self, Read, Write},
     mem,
 };
 
-use libc::{atexit, tcgetattr, tcsetattr, termios, ECHO, STDIN_FILENO, TCSAFLUSH};
+use libc::{atexit, tcgetattr, tcsetattr, termios, ECHO, ICANON, STDIN_FILENO, TCSAFLUSH};
 
 static mut ORIG_TERMIOS: termios = unsafe { mem::zeroed() };
 
@@ -18,7 +18,7 @@ fn enable_raw_mode() {
         tcgetattr(STDIN_FILENO, &mut ORIG_TERMIOS);
         atexit(disable_raw_mode);
         let mut raw = ORIG_TERMIOS.clone();
-        raw.c_lflag &= !ECHO;
+        raw.c_lflag &= !(ECHO | ICANON);
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
     }
 }
@@ -32,5 +32,7 @@ fn main() {
         if &c == b"q" {
             break;
         }
+        print!("{}", String::from_utf8_lossy(&c));
+        io::stdout().flush().unwrap();
     }
 }
