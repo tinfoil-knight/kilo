@@ -1,5 +1,6 @@
 use std::{
-    io::{self, Read, Write},
+    fmt::Display,
+    io::{self, Read},
     mem,
     process::exit,
 };
@@ -18,11 +19,17 @@ const fn ctrl_key(k: char) -> u8 {
 
 static mut ORIG_TERMIOS: termios = unsafe { mem::zeroed() };
 
+// terminal
+
+fn die<E: Display>(message: &str, error: E) -> ! {
+    eprintln!("{} : {}", message, error);
+    exit(1);
+}
+
 extern "C" fn disable_raw_mode() {
     unsafe {
         if tcsetattr(STDIN_FILENO, TCSAFLUSH, &ORIG_TERMIOS) != 0 {
-            eprintln!("Failed to disable raw mode: {}", io::Error::last_os_error());
-            exit(1);
+            die("Failed to disable raw mode", io::Error::last_os_error());
         };
     }
 }
@@ -80,6 +87,8 @@ fn editor_read_key() -> char {
     char::from(buf[0])
 }
 
+// input
+
 fn editor_process_keypress() {
     let c = editor_read_key();
 
@@ -88,10 +97,11 @@ fn editor_process_keypress() {
     }
 }
 
+// init
+
 fn main() {
     if let Err(e) = enable_raw_mode() {
-        eprintln!("Failed to enable raw mode: {}", e);
-        exit(1)
+        die("Failed to enable raw mode", e);
     };
 
     loop {
