@@ -111,10 +111,13 @@ fn write(buf: &[u8]) -> io::Result<()> {
 }
 
 fn get_cursor_position() -> io::Result<(u16, u16)> {
+    // n cmd - Device Status Report
+    // arg 6 - ask for cursor position
     write(b"\x1b[6n")?;
     io::stdout().flush().unwrap();
 
     let mut buf = Vec::new();
+    // Cursor Position Report: "<Esc>[rows;colsR"
     io::stdin().lock().read_until(b'R', &mut buf)?;
 
     match String::from_utf8(buf) {
@@ -167,10 +170,16 @@ fn editor_clear_screen() {
 
 fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     let rows = unsafe { ECFG.screenrows };
-    for _ in 0..rows - 1 {
-        w.write_all(b"~\r\n")?;
+    for y in 0..rows {
+        w.write_all(b"~")?;
+        // K cmd - Erase in Line (erases part of current line)
+        // default arg is 0 which erases the part of the line to the right of the cursor.
+        w.write_all(b"\x1b[K")?;
+
+        if y < rows - 1 {
+            w.write_all(b"\r\n")?;
+        }
     }
-    w.write_all(b"~")?;
 
     Ok(())
 }
@@ -180,7 +189,6 @@ fn editor_refresh_screen() -> io::Result<()> {
 
     // l cmd - Reset mode
     w.write_all(b"\x1b[?25l")?; // hide the cursor
-    w.write_all(b"\x1b[2J")?; // clear the screen
     w.write_all(b"\x1b[H")?; // reposition cursor to default position
 
     editor_draw_rows(&mut w)?;
