@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    io::{self, BufRead, Read, Write},
+    io::{self, BufRead, BufWriter, Read, Stdout, Write},
     mem,
     process::exit,
 };
@@ -165,22 +165,28 @@ fn editor_clear_screen() {
     io::stdout().flush().unwrap();
 }
 
-fn editor_draw_rows() {
+fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     let rows = unsafe { ECFG.screenrows };
-    for _ in 0..rows {
-        print!("~\r\n");
+    for _ in 0..rows - 1 {
+        w.write_all(b"~\r\n")?;
     }
+    w.write_all(b"~")?;
+
+    Ok(())
 }
 
-fn editor_refresh_screen() {
-    print!("\x1b[2J");
-    print!("\x1b[H");
+fn editor_refresh_screen() -> io::Result<()> {
+    let mut w = io::BufWriter::new(io::stdout());
 
-    editor_draw_rows();
+    w.write_all(b"\x1b[2J")?;
+    w.write_all(b"\x1b[H")?;
 
-    print!("\x1b[H");
+    editor_draw_rows(&mut w)?;
 
-    io::stdout().flush().unwrap();
+    w.write_all(b"\x1b[H")?;
+    w.flush()?;
+
+    Ok(())
 }
 
 // input
@@ -212,7 +218,7 @@ fn main() {
     };
 
     loop {
-        editor_refresh_screen();
+        editor_refresh_screen().unwrap();
         editor_process_keypress();
     }
 }
