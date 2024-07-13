@@ -1,13 +1,26 @@
 use std::{
     fmt::Display,
-    io::{self, Read, Write},
+    io::{self, BufRead, Read, Write},
     mem,
     process::exit,
 };
 
 use libc::{
-    atexit, tcgetattr, tcsetattr, termios, BRKINT, CS8, ECHO, ICANON, ICRNL, IEXTEN, INPCK, ISIG,
-    ISTRIP, IXON, OPOST, STDIN_FILENO, TCSAFLUSH, VMIN, VTIME,
+    atexit, ioctl, tcgetattr, tcsetattr, termios, winsize, BRKINT, CS8, ECHO, ICANON, ICRNL,
+    IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST, STDIN_FILENO, STDOUT_FILENO, TCSAFLUSH, TIOCGWINSZ,
+    VMIN, VTIME,
+};
+
+struct EditorConfig {
+    orig_termios: termios,
+    screenrows: u16,
+    screencols: u16,
+}
+
+static mut ECFG: EditorConfig = EditorConfig {
+    orig_termios: unsafe { mem::zeroed() },
+    screenrows: 0,
+    screencols: 0,
 };
 
 const fn ctrl_key(k: char) -> u8 {
@@ -16,8 +29,6 @@ const fn ctrl_key(k: char) -> u8 {
     // in the character corresponding to the key pressed
     (k as u8) & 0x1f
 }
-
-static mut ORIG_TERMIOS: termios = unsafe { mem::zeroed() };
 
 // terminal
 
@@ -30,7 +41,7 @@ fn die<E: Display>(message: &str, error: E) -> ! {
 
 extern "C" fn disable_raw_mode() {
     unsafe {
-        if tcsetattr(STDIN_FILENO, TCSAFLUSH, &ORIG_TERMIOS) != 0 {
+        if tcsetattr(STDIN_FILENO, TCSAFLUSH, &ECFG.orig_termios) != 0 {
             die("Failed to disable raw mode", io::Error::last_os_error());
         };
     }
@@ -39,13 +50,13 @@ extern "C" fn disable_raw_mode() {
 fn enable_raw_mode() -> io::Result<()> {
     // Ref: https://www.man7.org/linux/man-pages/man3/termios.3.html
     unsafe {
-        if tcgetattr(STDIN_FILENO, &mut ORIG_TERMIOS) != 0 {
+        if tcgetattr(STDIN_FILENO, &mut ECFG.orig_termios) != 0 {
             return Err(io::Error::last_os_error());
         };
         if atexit(disable_raw_mode) != 0 {
             return Err(io::Error::last_os_error());
         };
-        let mut raw = ORIG_TERMIOS.clone();
+        let mut raw = ECFG.orig_termios;
 
         // Input Flags:
         // IXON - Enable XON/XOFF flow control (triggered through Ctrl+S, Ctrl+Q) on output.
@@ -95,6 +106,50 @@ fn editor_read_key() -> char {
     char::from(buf[0])
 }
 
+fn write(buf: &[u8]) -> io::Result<()> {
+    io::stdout().lock().write_all(buf)
+}
+
+fn get_cursor_position() -> io::Result<(u16, u16)> {
+    write(b"\x1b[6n")?;
+    io::stdout().flush().unwrap();
+
+    let mut buf = Vec::new();
+    io::stdin().lock().read_until(b'R', &mut buf)?;
+
+    match String::from_utf8(buf) {
+        Ok(v) => {
+            if v.starts_with(['\x1b', '[']) && v.ends_with('R') {
+                if let Some((rows, cols)) = &v[2..v.len() - 1].split_once(';') {
+                    match (rows.parse::<u16>(), cols.parse::<u16>()) {
+                        (Ok(rows), Ok(cols)) => return Ok((rows, cols)),
+                        _ => return Err(io::Error::other("failed to parse rows or cols")),
+                    }
+                };
+            }
+            Err(io::Error::other("invalid escape sequence"))
+        }
+        Err(e) => Err(io::Error::other(e)),
+    }
+}
+
+fn get_window_size() -> io::Result<(u16, u16)> {
+    unsafe {
+        let mut ws: winsize = mem::zeroed();
+        // TIOCGWINSZ - Get window size
+        if ioctl(STDOUT_FILENO, TIOCGWINSZ, &mut ws) == -1 || ws.ws_col == 0 {
+            // C cmd - Cursor Forward
+            // B cmd - Cursor Down
+            // Note: C, B cmds stop the cursor from going past the edge of the screen.
+            // We use a large argument to ensure that the cursor reaches the right-bottom edge of screen.
+            write(b"\x1b[999C\x1b[999B")?;
+            return get_cursor_position();
+        }
+
+        Ok((ws.ws_row, ws.ws_col))
+    }
+}
+
 // output
 
 fn editor_clear_screen() {
@@ -111,7 +166,8 @@ fn editor_clear_screen() {
 }
 
 fn editor_draw_rows() {
-    for _ in 0..24 {
+    let rows = unsafe { ECFG.screenrows };
+    for _ in 0..rows {
         print!("~\r\n");
     }
 }
@@ -140,9 +196,19 @@ fn editor_process_keypress() {
 
 // init
 
+fn init_editor() -> io::Result<()> {
+    unsafe {
+        (ECFG.screenrows, ECFG.screencols) = get_window_size()?;
+    }
+    Ok(())
+}
+
 fn main() {
     if let Err(e) = enable_raw_mode() {
         die("Failed to enable raw mode", e);
+    };
+    if let Err(e) = init_editor() {
+        die("Failed to get window size", e)
     };
 
     loop {
