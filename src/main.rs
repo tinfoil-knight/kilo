@@ -178,12 +178,17 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
 fn editor_refresh_screen() -> io::Result<()> {
     let mut w = io::BufWriter::new(io::stdout());
 
-    w.write_all(b"\x1b[2J")?;
-    w.write_all(b"\x1b[H")?;
+    // l cmd - Reset mode
+    w.write_all(b"\x1b[?25l")?; // hide the cursor
+    w.write_all(b"\x1b[2J")?; // clear the screen
+    w.write_all(b"\x1b[H")?; // reposition cursor to default position
 
     editor_draw_rows(&mut w)?;
 
     w.write_all(b"\x1b[H")?;
+    // h cmd - Set mode
+    w.write_all(b"\x1b[?25h")?; // show the cursor
+
     w.flush()?;
 
     Ok(())
