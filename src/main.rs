@@ -1,4 +1,5 @@
 use std::{
+    char,
     fmt::Display,
     io::{self, BufRead, BufWriter, Read, Stdout, Write},
     mem,
@@ -12,15 +13,22 @@ use libc::{
 };
 
 struct EditorConfig {
+    /// Initial terminal config
     orig_termios: termios,
     screenrows: usize,
     screencols: usize,
+    /// Cursor X coordinate
+    cx: usize,
+    /// Cursor Y coordinate
+    cy: usize,
 }
 
 static mut ECFG: EditorConfig = EditorConfig {
     orig_termios: unsafe { mem::zeroed() },
     screenrows: 0,
     screencols: 0,
+    cx: 0,
+    cy: 0,
 };
 
 const KILO_VERSION: &str = "0.0.1";
@@ -206,11 +214,13 @@ fn editor_refresh_screen() -> io::Result<()> {
 
     // l cmd - Reset mode
     w.write_all(b"\x1b[?25l")?; // hide the cursor
-    w.write_all(b"\x1b[H")?; // reposition cursor to default position
+    w.write_all(b"\x1b[H")?; // reposition cursor to default position (1,1)
 
     editor_draw_rows(&mut w)?;
 
-    w.write_all(b"\x1b[H")?;
+    let (cx, cy) = unsafe { (ECFG.cx + 1, ECFG.cy + 1) };
+    w.write_all(format!("\x1b[{};{}H", cy, cx).as_bytes())?;
+
     // h cmd - Set mode
     w.write_all(b"\x1b[?25h")?; // show the cursor
 
@@ -221,12 +231,30 @@ fn editor_refresh_screen() -> io::Result<()> {
 
 // input
 
+fn editor_move_cursor(key: char) {
+    unsafe {
+        match key {
+            'a' => ECFG.cx = ECFG.cx.saturating_sub(1),
+            'd' => ECFG.cx = ECFG.cx.saturating_add(1),
+            'w' => ECFG.cy = ECFG.cy.saturating_sub(1),
+            's' => ECFG.cy = ECFG.cy.saturating_add(1),
+            _ => {}
+        }
+    }
+}
+
 fn editor_process_keypress() {
     let c = editor_read_key();
 
-    if (c as u8) == ctrl_key('q') {
-        editor_clear_screen();
-        exit(0);
+    match c {
+        c if (c as u8) == ctrl_key('q') => {
+            editor_clear_screen();
+            exit(0);
+        }
+        'w' | 'a' | 's' | 'd' => {
+            editor_move_cursor(c);
+        }
+        _ => {}
     }
 }
 
