@@ -23,6 +23,8 @@ static mut ECFG: EditorConfig = EditorConfig {
     screencols: 0,
 };
 
+const KILO_VERSION: &str = "0.0.1";
+
 const fn ctrl_key(k: char) -> u8 {
     // when you press Ctrl in combination w/ other key in the terminal
     // a modified character is sent w/ bits 5 and 6 stripped (set to '0')
@@ -170,8 +172,23 @@ fn editor_clear_screen() {
 
 fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     let rows = unsafe { ECFG.screenrows };
+    let cols = unsafe { ECFG.screencols };
     for y in 0..rows {
-        w.write_all(b"~")?;
+        if y == rows / 3 {
+            let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
+            welcome_msg.truncate(cols as usize);
+
+            let padding_len = (cols as usize - welcome_msg.len()) / 2;
+            if padding_len > 0 {
+                w.write_all(b"~")?;
+                w.write_all(" ".repeat(padding_len - 1).as_bytes())?;
+            }
+
+            w.write_all(welcome_msg.as_bytes())?;
+        } else {
+            w.write_all(b"~")?;
+        }
+
         // K cmd - Erase in Line (erases part of current line)
         // default arg is 0 which erases the part of the line to the right of the cursor.
         w.write_all(b"\x1b[K")?;
