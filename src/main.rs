@@ -13,8 +13,8 @@ use libc::{
 
 struct EditorConfig {
     orig_termios: termios,
-    screenrows: u16,
-    screencols: u16,
+    screenrows: usize,
+    screencols: usize,
 }
 
 static mut ECFG: EditorConfig = EditorConfig {
@@ -112,7 +112,7 @@ fn write(buf: &[u8]) -> io::Result<()> {
     io::stdout().lock().write_all(buf)
 }
 
-fn get_cursor_position() -> io::Result<(u16, u16)> {
+fn get_cursor_position() -> io::Result<(usize, usize)> {
     // n cmd - Device Status Report
     // arg 6 - ask for cursor position
     write(b"\x1b[6n")?;
@@ -126,7 +126,7 @@ fn get_cursor_position() -> io::Result<(u16, u16)> {
         Ok(v) => {
             if v.starts_with(['\x1b', '[']) && v.ends_with('R') {
                 if let Some((rows, cols)) = &v[2..v.len() - 1].split_once(';') {
-                    match (rows.parse::<u16>(), cols.parse::<u16>()) {
+                    match (rows.parse::<usize>(), cols.parse::<usize>()) {
                         (Ok(rows), Ok(cols)) => return Ok((rows, cols)),
                         _ => return Err(io::Error::other("failed to parse rows or cols")),
                     }
@@ -138,7 +138,7 @@ fn get_cursor_position() -> io::Result<(u16, u16)> {
     }
 }
 
-fn get_window_size() -> io::Result<(u16, u16)> {
+fn get_window_size() -> io::Result<(usize, usize)> {
     unsafe {
         let mut ws: winsize = mem::zeroed();
         // TIOCGWINSZ - Get window size
@@ -151,7 +151,7 @@ fn get_window_size() -> io::Result<(u16, u16)> {
             return get_cursor_position();
         }
 
-        Ok((ws.ws_row, ws.ws_col))
+        Ok((ws.ws_row.into(), ws.ws_col.into()))
     }
 }
 
@@ -176,9 +176,9 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     for y in 0..rows {
         if y == rows / 3 {
             let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
-            welcome_msg.truncate(cols as usize);
+            welcome_msg.truncate(cols);
 
-            let padding_len = (cols as usize - welcome_msg.len()) / 2;
+            let padding_len = (cols - welcome_msg.len()) / 2;
             if padding_len > 0 {
                 w.write_all(b"~")?;
                 w.write_all(" ".repeat(padding_len - 1).as_bytes())?;
