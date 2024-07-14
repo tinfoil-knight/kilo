@@ -50,6 +50,9 @@ enum EditorKey {
     ArrowDown,
     PageUp,
     PageDown,
+    Home,
+    End,
+    Delete,
 }
 
 // terminal
@@ -133,25 +136,42 @@ fn editor_read_key() -> EditorKey {
 
     if c == '\x1b' {
         // attempt to read the rest of the escape sequence
-        if let Ok('[') = read_char() {
-            if let Ok(s1) = read_char() {
-                match s1 {
-                    '1'..='9' => {
-                        if let Ok('~') = read_char() {
-                            match s1 {
-                                '5' => return EditorKey::PageUp,
-                                '6' => return EditorKey::PageDown,
-                                _ => {}
+        match read_char() {
+            Ok('[') => {
+                if let Ok(s1) = read_char() {
+                    match s1 {
+                        '1'..='9' => {
+                            if let Ok('~') = read_char() {
+                                match s1 {
+                                    '1' | '7' => return EditorKey::Home,
+                                    '3' => return EditorKey::Delete,
+                                    '4' | '8' => return EditorKey::End,
+                                    '5' => return EditorKey::PageUp,
+                                    '6' => return EditorKey::PageDown,
+                                    _ => {}
+                                }
                             }
                         }
+                        'A' => return EditorKey::ArrowUp,
+                        'B' => return EditorKey::ArrowDown,
+                        'C' => return EditorKey::ArrowRight,
+                        'D' => return EditorKey::ArrowLeft,
+                        'H' => return EditorKey::Home,
+                        'F' => return EditorKey::End,
+                        _ => {}
                     }
-                    'A' => return EditorKey::ArrowUp,
-                    'B' => return EditorKey::ArrowDown,
-                    'C' => return EditorKey::ArrowRight,
-                    'D' => return EditorKey::ArrowLeft,
-                    _ => {}
                 }
             }
+            Ok('O') => {
+                if let Ok(s1) = read_char() {
+                    match s1 {
+                        'H' => return EditorKey::Home,
+                        'F' => return EditorKey::End,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -309,6 +329,12 @@ fn editor_process_keypress() {
         | EditorKey::ArrowRight) => {
             editor_move_cursor(c);
         }
+        EditorKey::Home => unsafe {
+            ECFG.cx = 0;
+        },
+        EditorKey::End => unsafe {
+            ECFG.cx = ECFG.screencols.saturating_sub(1);
+        },
         _ => {}
     }
 }
