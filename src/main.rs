@@ -41,12 +41,15 @@ const fn ctrl_key(k: char) -> u8 {
     (k as u8) & 0x1f
 }
 
+#[derive(PartialEq, Clone, Copy)]
 enum EditorKey {
     Char(char),
     ArrowLeft,
     ArrowRight,
     ArrowUp,
     ArrowDown,
+    PageUp,
+    PageDown,
 }
 
 // terminal
@@ -130,16 +133,23 @@ fn editor_read_key() -> EditorKey {
 
     if c == '\x1b' {
         // attempt to read the rest of the escape sequence
-        if let Ok(s0) = read_char() {
+        if let Ok('[') = read_char() {
             if let Ok(s1) = read_char() {
-                if s0 == '[' {
-                    return match s1 {
-                        'A' => EditorKey::ArrowUp,
-                        'B' => EditorKey::ArrowDown,
-                        'C' => EditorKey::ArrowRight,
-                        'D' => EditorKey::ArrowLeft,
-                        _ => EditorKey::Char(c),
-                    };
+                match s1 {
+                    '1'..='9' => {
+                        if let Ok('~') = read_char() {
+                            match s1 {
+                                '5' => return EditorKey::PageUp,
+                                '6' => return EditorKey::PageDown,
+                                _ => {}
+                            }
+                        }
+                    }
+                    'A' => return EditorKey::ArrowUp,
+                    'B' => return EditorKey::ArrowDown,
+                    'C' => return EditorKey::ArrowRight,
+                    'D' => return EditorKey::ArrowLeft,
+                    _ => {}
                 }
             }
         }
@@ -280,6 +290,18 @@ fn editor_process_keypress() {
         EditorKey::Char(c) if (c as u8) == ctrl_key('q') => {
             editor_clear_screen();
             exit(0);
+        }
+        c @ (EditorKey::PageUp | EditorKey::PageDown) => {
+            let times = unsafe { ECFG.screenrows };
+            let movement = if c == EditorKey::PageUp {
+                EditorKey::ArrowUp
+            } else {
+                EditorKey::ArrowDown
+            };
+
+            for _ in 0..times {
+                editor_move_cursor(movement);
+            }
         }
         c @ (EditorKey::ArrowUp
         | EditorKey::ArrowDown
