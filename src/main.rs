@@ -4,6 +4,7 @@ use std::{
     io::{self, BufRead, BufWriter, Read, Stdout, Write},
     mem,
     process::exit,
+    u8,
 };
 
 use libc::{
@@ -38,6 +39,14 @@ const fn ctrl_key(k: char) -> u8 {
     // a modified character is sent w/ bits 5 and 6 stripped (set to '0')
     // in the character corresponding to the key pressed
     (k as u8) & 0x1f
+}
+
+enum EditorKey {
+    Char(char),
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    ArrowDown,
 }
 
 // terminal
@@ -104,16 +113,39 @@ fn enable_raw_mode() -> io::Result<()> {
     Ok(())
 }
 
-fn editor_read_key() -> char {
+fn read_char() -> io::Result<char> {
     let mut buf = [0; 1];
+    io::stdin().read_exact(&mut buf)?;
+    Ok(char::from(buf[0]))
+}
 
-    while let Err(e) = io::stdin().read_exact(&mut buf) {
-        if e.kind() != io::ErrorKind::UnexpectedEof {
-            die("Failed to read from stdin", e);
+fn editor_read_key() -> EditorKey {
+    let c = loop {
+        match read_char() {
+            Ok(c) => break c,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+            Err(e) => die("Failed to read from stdin", e),
+        }
+    };
+
+    if c == '\x1b' {
+        // attempt to read the rest of the escape sequence
+        if let Ok(s0) = read_char() {
+            if let Ok(s1) = read_char() {
+                if s0 == '[' {
+                    return match s1 {
+                        'A' => EditorKey::ArrowUp,
+                        'B' => EditorKey::ArrowDown,
+                        'C' => EditorKey::ArrowRight,
+                        'D' => EditorKey::ArrowLeft,
+                        _ => EditorKey::Char(c),
+                    };
+                }
+            }
         }
     }
 
-    char::from(buf[0])
+    EditorKey::Char(c)
 }
 
 fn write(buf: &[u8]) -> io::Result<()> {
@@ -231,27 +263,28 @@ fn editor_refresh_screen() -> io::Result<()> {
 
 // input
 
-fn editor_move_cursor(key: char) {
+fn editor_move_cursor(key: EditorKey) {
     unsafe {
         match key {
-            'a' => ECFG.cx = ECFG.cx.saturating_sub(1),
-            'd' => ECFG.cx = ECFG.cx.saturating_add(1),
-            'w' => ECFG.cy = ECFG.cy.saturating_sub(1),
-            's' => ECFG.cy = ECFG.cy.saturating_add(1),
+            EditorKey::ArrowLeft => ECFG.cx = ECFG.cx.saturating_sub(1),
+            EditorKey::ArrowRight => ECFG.cx = ECFG.cx.saturating_add(1),
+            EditorKey::ArrowUp => ECFG.cy = ECFG.cy.saturating_sub(1),
+            EditorKey::ArrowDown => ECFG.cy = ECFG.cy.saturating_add(1),
             _ => {}
         }
     }
 }
 
 fn editor_process_keypress() {
-    let c = editor_read_key();
-
-    match c {
-        c if (c as u8) == ctrl_key('q') => {
+    match editor_read_key() {
+        EditorKey::Char(c) if (c as u8) == ctrl_key('q') => {
             editor_clear_screen();
             exit(0);
         }
-        'w' | 'a' | 's' | 'd' => {
+        c @ (EditorKey::ArrowUp
+        | EditorKey::ArrowDown
+        | EditorKey::ArrowLeft
+        | EditorKey::ArrowRight) => {
             editor_move_cursor(c);
         }
         _ => {}
