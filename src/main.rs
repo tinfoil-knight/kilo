@@ -1,10 +1,12 @@
 use std::{
-    char,
+    cmp::min,
+    env,
     fmt::Display,
-    io::{self, BufRead, BufWriter, Read, Stdout, Write},
+    fs::File,
+    io::{self, BufRead, BufReader, BufWriter, Read, Stdout, Write},
     mem,
+    path::Path,
     process::exit,
-    u8,
 };
 
 use libc::{
@@ -22,6 +24,8 @@ struct EditorConfig {
     cx: usize,
     /// Cursor Y coordinate
     cy: usize,
+    numrows: usize,
+    rows: Vec<String>,
 }
 
 static mut ECFG: EditorConfig = EditorConfig {
@@ -30,6 +34,8 @@ static mut ECFG: EditorConfig = EditorConfig {
     screencols: 0,
     cx: 0,
     cy: 0,
+    numrows: 0,
+    rows: Vec::new(),
 };
 
 const KILO_VERSION: &str = "0.0.1";
@@ -225,6 +231,22 @@ fn get_window_size() -> io::Result<(usize, usize)> {
     }
 }
 
+// file i/o
+
+fn editor_open(path: &String) {
+    let file = match File::open(Path::new(path)) {
+        Ok(file) => file,
+        Err(e) => die("Could not open file", e),
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        unsafe {
+            ECFG.rows.push(line.unwrap());
+            ECFG.numrows += 1;
+        }
+    }
+}
+
 // output
 
 fn editor_clear_screen() {
@@ -241,22 +263,27 @@ fn editor_clear_screen() {
 }
 
 fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
-    let rows = unsafe { ECFG.screenrows };
-    let cols = unsafe { ECFG.screencols };
+    let (rows, cols) = unsafe { (ECFG.screenrows, ECFG.screencols) };
+    let numrows = unsafe { ECFG.numrows };
     for y in 0..rows {
-        if y == rows / 3 {
-            let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
-            welcome_msg.truncate(cols);
+        if y >= numrows {
+            if numrows == 0 && y == rows / 3 {
+                let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
+                welcome_msg.truncate(cols);
 
-            let padding_len = (cols - welcome_msg.len()) / 2;
-            if padding_len > 0 {
+                let padding_len = (cols - welcome_msg.len()) / 2;
+                if padding_len > 0 {
+                    w.write_all(b"~")?;
+                    w.write_all(" ".repeat(padding_len - 1).as_bytes())?;
+                }
+
+                w.write_all(welcome_msg.as_bytes())?;
+            } else {
                 w.write_all(b"~")?;
-                w.write_all(" ".repeat(padding_len - 1).as_bytes())?;
             }
-
-            w.write_all(welcome_msg.as_bytes())?;
         } else {
-            w.write_all(b"~")?;
+            let r = unsafe { &ECFG.rows[y] };
+            w.write_all(r[..min(r.len(), cols)].as_bytes())?;
         }
 
         // K cmd - Erase in Line (erases part of current line)
@@ -349,12 +376,18 @@ fn init_editor() -> io::Result<()> {
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+
     if let Err(e) = enable_raw_mode() {
         die("Failed to enable raw mode", e);
     };
     if let Err(e) = init_editor() {
         die("Failed to get window size", e)
     };
+
+    if args.len() >= 2 {
+        editor_open(&args[1]);
+    }
 
     loop {
         editor_refresh_screen().unwrap();
