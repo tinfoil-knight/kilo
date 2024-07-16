@@ -366,8 +366,26 @@ fn editor_move_cursor(key: EditorKey) {
         };
 
         match key {
-            EditorKey::ArrowLeft => ECFG.cx = ECFG.cx.saturating_sub(1),
-            EditorKey::ArrowRight if row.is_some() && ECFG.cx < row.unwrap().len() => ECFG.cx += 1,
+            EditorKey::ArrowLeft => {
+                if ECFG.cx != 0 {
+                    ECFG.cx -= 1
+                } else if ECFG.cy > 0 {
+                    ECFG.cy -= 1;
+                    ECFG.cx = ECFG.rows[ECFG.cy].len();
+                }
+            }
+            EditorKey::ArrowRight => {
+                if let Some(row) = row {
+                    match ECFG.cx.cmp(&row.len()) {
+                        std::cmp::Ordering::Less => ECFG.cx += 1,
+                        std::cmp::Ordering::Equal => {
+                            ECFG.cy += 1;
+                            ECFG.cx = 0;
+                        }
+                        std::cmp::Ordering::Greater => {}
+                    }
+                }
+            }
             EditorKey::ArrowUp => ECFG.cy = ECFG.cy.saturating_sub(1),
             EditorKey::ArrowDown if ECFG.cy < ECFG.numrows => ECFG.cy += 1,
             _ => {}
