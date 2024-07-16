@@ -24,6 +24,7 @@ struct EditorConfig {
     cx: usize,
     /// Cursor Y coordinate
     cy: usize,
+    row_offset: usize,
     numrows: usize,
     rows: Vec<String>,
 }
@@ -35,6 +36,7 @@ static mut ECFG: EditorConfig = EditorConfig {
     cx: 0,
     cy: 0,
     numrows: 0,
+    row_offset: 0,
     rows: Vec::new(),
 };
 
@@ -265,8 +267,11 @@ fn editor_clear_screen() {
 fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     let (rows, cols) = unsafe { (ECFG.screenrows, ECFG.screencols) };
     let numrows = unsafe { ECFG.numrows };
+    let row_offset = unsafe { ECFG.row_offset };
+
     for y in 0..rows {
-        if y >= numrows {
+        let filerow = y + row_offset;
+        if filerow >= numrows {
             if numrows == 0 && y == rows / 3 {
                 let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
                 welcome_msg.truncate(cols);
@@ -282,7 +287,7 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
                 w.write_all(b"~")?;
             }
         } else {
-            let r = unsafe { &ECFG.rows[y] };
+            let r = unsafe { &ECFG.rows[filerow] };
             w.write_all(r[..min(r.len(), cols)].as_bytes())?;
         }
 
@@ -298,7 +303,22 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     Ok(())
 }
 
+fn editor_scroll() {
+    unsafe {
+        let (cy, row_offset, rows) = (ECFG.cy, ECFG.row_offset, ECFG.screenrows);
+        if cy < row_offset {
+            ECFG.row_offset = cy;
+        }
+
+        if cy >= row_offset + rows {
+            ECFG.row_offset = cy - rows + 1
+        }
+    }
+}
+
 fn editor_refresh_screen() -> io::Result<()> {
+    editor_scroll();
+
     let mut w = io::BufWriter::new(io::stdout());
 
     // l cmd - Reset mode
@@ -307,7 +327,7 @@ fn editor_refresh_screen() -> io::Result<()> {
 
     editor_draw_rows(&mut w)?;
 
-    let (cx, cy) = unsafe { (ECFG.cx + 1, ECFG.cy + 1) };
+    let (cx, cy) = unsafe { (ECFG.cx + 1, (ECFG.cy - ECFG.row_offset) + 1) };
     w.write_all(format!("\x1b[{};{}H", cy, cx).as_bytes())?;
 
     // h cmd - Set mode
@@ -324,9 +344,9 @@ fn editor_move_cursor(key: EditorKey) {
     unsafe {
         match key {
             EditorKey::ArrowLeft => ECFG.cx = ECFG.cx.saturating_sub(1),
-            EditorKey::ArrowRight => ECFG.cx = ECFG.cx.saturating_add(1),
+            EditorKey::ArrowRight if ECFG.cx != ECFG.screencols - 1 => ECFG.cx += 1,
             EditorKey::ArrowUp => ECFG.cy = ECFG.cy.saturating_sub(1),
-            EditorKey::ArrowDown => ECFG.cy = ECFG.cy.saturating_add(1),
+            EditorKey::ArrowDown if ECFG.cy < ECFG.numrows => ECFG.cy += 1,
             _ => {}
         }
     }
