@@ -359,12 +359,30 @@ fn editor_refresh_screen() -> io::Result<()> {
 
 fn editor_move_cursor(key: EditorKey) {
     unsafe {
+        let row = if ECFG.cy >= ECFG.numrows {
+            None
+        } else {
+            Some(&ECFG.rows[ECFG.cy])
+        };
+
         match key {
             EditorKey::ArrowLeft => ECFG.cx = ECFG.cx.saturating_sub(1),
-            EditorKey::ArrowRight => ECFG.cx += 1,
+            EditorKey::ArrowRight if row.is_some() && ECFG.cx < row.unwrap().len() => ECFG.cx += 1,
             EditorKey::ArrowUp => ECFG.cy = ECFG.cy.saturating_sub(1),
             EditorKey::ArrowDown if ECFG.cy < ECFG.numrows => ECFG.cy += 1,
             _ => {}
+        }
+
+        // snap cursor to end of line
+
+        let row = if ECFG.cy >= ECFG.numrows {
+            None
+        } else {
+            Some(&ECFG.rows[ECFG.cy])
+        };
+        let rowlen = if let Some(row) = row { row.len() } else { 0 };
+        if ECFG.cx > rowlen {
+            ECFG.cx = rowlen;
         }
     }
 }
