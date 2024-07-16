@@ -1,5 +1,4 @@
 use std::{
-    cmp::min,
     env,
     fmt::Display,
     fs::File,
@@ -25,6 +24,7 @@ struct EditorConfig {
     /// Cursor Y coordinate
     cy: usize,
     row_offset: usize,
+    col_offset: usize,
     numrows: usize,
     rows: Vec<String>,
 }
@@ -37,6 +37,7 @@ static mut ECFG: EditorConfig = EditorConfig {
     cy: 0,
     numrows: 0,
     row_offset: 0,
+    col_offset: 0,
     rows: Vec::new(),
 };
 
@@ -267,7 +268,7 @@ fn editor_clear_screen() {
 fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     let (rows, cols) = unsafe { (ECFG.screenrows, ECFG.screencols) };
     let numrows = unsafe { ECFG.numrows };
-    let row_offset = unsafe { ECFG.row_offset };
+    let (row_offset, col_offset) = unsafe { (ECFG.row_offset, ECFG.col_offset) };
 
     for y in 0..rows {
         let filerow = y + row_offset;
@@ -288,7 +289,10 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
             }
         } else {
             let r = unsafe { &ECFG.rows[filerow] };
-            w.write_all(r[..min(r.len(), cols)].as_bytes())?;
+            let len = r.len().saturating_sub(col_offset).clamp(0, cols);
+            let start = if len == 0 { 0 } else { col_offset };
+            let end = start + len;
+            w.write_all(r[start..end].as_bytes())?;
         }
 
         // K cmd - Erase in Line (erases part of current line)
@@ -305,13 +309,21 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
 
 fn editor_scroll() {
     unsafe {
-        let (cy, row_offset, rows) = (ECFG.cy, ECFG.row_offset, ECFG.screenrows);
-        if cy < row_offset {
+        let (cx, cy) = (ECFG.cx, ECFG.cy);
+        let (rows, cols) = (ECFG.screenrows, ECFG.screencols);
+
+        if cy < ECFG.row_offset {
             ECFG.row_offset = cy;
         }
-
-        if cy >= row_offset + rows {
+        if cy >= ECFG.row_offset + rows {
             ECFG.row_offset = cy - rows + 1
+        }
+
+        if cx < ECFG.col_offset {
+            ECFG.col_offset = cx
+        }
+        if cx >= ECFG.col_offset + cols {
+            ECFG.col_offset = cx - cols + 1
         }
     }
 }
@@ -327,7 +339,12 @@ fn editor_refresh_screen() -> io::Result<()> {
 
     editor_draw_rows(&mut w)?;
 
-    let (cx, cy) = unsafe { (ECFG.cx + 1, (ECFG.cy - ECFG.row_offset) + 1) };
+    let (cy, cx) = unsafe {
+        (
+            (ECFG.cy - ECFG.row_offset) + 1,
+            (ECFG.cx - ECFG.col_offset) + 1,
+        )
+    };
     w.write_all(format!("\x1b[{};{}H", cy, cx).as_bytes())?;
 
     // h cmd - Set mode
@@ -344,7 +361,7 @@ fn editor_move_cursor(key: EditorKey) {
     unsafe {
         match key {
             EditorKey::ArrowLeft => ECFG.cx = ECFG.cx.saturating_sub(1),
-            EditorKey::ArrowRight if ECFG.cx != ECFG.screencols - 1 => ECFG.cx += 1,
+            EditorKey::ArrowRight => ECFG.cx += 1,
             EditorKey::ArrowUp => ECFG.cy = ECFG.cy.saturating_sub(1),
             EditorKey::ArrowDown if ECFG.cy < ECFG.numrows => ECFG.cy += 1,
             _ => {}
