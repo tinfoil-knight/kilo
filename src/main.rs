@@ -411,8 +411,17 @@ fn editor_process_keypress() {
             editor_clear_screen();
             exit(0);
         }
-        c @ (EditorKey::PageUp | EditorKey::PageDown) => {
-            let times = unsafe { ECFG.screenrows };
+        c @ (EditorKey::PageUp | EditorKey::PageDown) => unsafe {
+            if c == EditorKey::PageUp {
+                ECFG.cy = ECFG.row_offset
+            } else {
+                ECFG.cy = ECFG.row_offset + ECFG.screenrows - 1;
+                if ECFG.cy > ECFG.numrows {
+                    ECFG.cy = ECFG.numrows
+                };
+            }
+
+            let times = ECFG.screenrows;
             let movement = if c == EditorKey::PageUp {
                 EditorKey::ArrowUp
             } else {
@@ -422,7 +431,7 @@ fn editor_process_keypress() {
             for _ in 0..times {
                 editor_move_cursor(movement);
             }
-        }
+        },
         c @ (EditorKey::ArrowUp
         | EditorKey::ArrowDown
         | EditorKey::ArrowLeft
