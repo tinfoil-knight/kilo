@@ -1,4 +1,5 @@
 use std::{
+    cmp::min,
     env,
     fmt::Display,
     fs::File,
@@ -27,6 +28,7 @@ struct EditorConfig {
     col_offset: usize,
     numrows: usize,
     rows: Vec<String>,
+    filename: Option<String>,
 }
 
 static mut ECFG: EditorConfig = EditorConfig {
@@ -39,6 +41,7 @@ static mut ECFG: EditorConfig = EditorConfig {
     row_offset: 0,
     col_offset: 0,
     rows: Vec::new(),
+    filename: None,
 };
 
 const KILO_VERSION: &str = "0.0.1";
@@ -236,10 +239,15 @@ fn get_window_size() -> io::Result<(usize, usize)> {
 
 // file i/o
 
-fn editor_open(path: &String) {
-    let file = match File::open(Path::new(path)) {
+fn editor_open(path: &Path) {
+    let file = match File::open(path) {
         Ok(file) => file,
         Err(e) => die("Could not open file", e),
+    };
+    unsafe {
+        ECFG.filename = path
+            .file_name()
+            .map(|os_str| os_str.to_str().unwrap().to_owned());
     };
     let reader = BufReader::new(file);
     for line in reader.lines() {
@@ -298,10 +306,7 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
         // K cmd - Erase in Line (erases part of current line)
         // default arg is 0 which erases the part of the line to the right of the cursor.
         w.write_all(b"\x1b[K")?;
-
-        if y < rows - 1 {
-            w.write_all(b"\r\n")?;
-        }
+        w.write_all(b"\r\n")?;
     }
 
     Ok(())
@@ -328,6 +333,37 @@ fn editor_scroll() {
     }
 }
 
+fn editor_draw_status_bar(w: &mut BufWriter<Stdout>) -> io::Result<()> {
+    // m cmd - Select Graphic Rendition
+    // arg 7 corresponds to inverted colors
+    w.write_all(b"\x1b[7m")?;
+    let fname = match unsafe { &ECFG.filename } {
+        Some(fname) => fname,
+        None => "[No Name]",
+    };
+
+    let cols = unsafe { ECFG.screencols };
+    let status = format!("{:.20} - {} lines", fname, unsafe { ECFG.numrows });
+    let mut len = min(cols, status.len());
+    let rstatus = format!("{}:{}", unsafe { ECFG.cy + 1 }, unsafe { ECFG.cx + 1 });
+    let rlen = rstatus.len();
+
+    w.write_all(status[..len].as_bytes())?;
+
+    while len < cols {
+        if cols - len == rlen {
+            w.write_all(rstatus[..rlen].as_bytes())?;
+            break;
+        } else {
+            w.write_all(b" ")?;
+            len += 1;
+        }
+    }
+
+    w.write_all(b"\x1b[m")?; // switch back to normal formatting
+    Ok(())
+}
+
 fn editor_refresh_screen() -> io::Result<()> {
     editor_scroll();
 
@@ -338,6 +374,7 @@ fn editor_refresh_screen() -> io::Result<()> {
     w.write_all(b"\x1b[H")?; // reposition cursor to default position (1,1)
 
     editor_draw_rows(&mut w)?;
+    editor_draw_status_bar(&mut w)?;
 
     let (cy, cx) = unsafe {
         (
@@ -455,6 +492,8 @@ fn editor_process_keypress() {
 fn init_editor() -> io::Result<()> {
     unsafe {
         (ECFG.screenrows, ECFG.screencols) = get_window_size()?;
+        // assign 1 line on the screen for the status bar
+        ECFG.screenrows -= 1;
     }
     Ok(())
 }
@@ -470,7 +509,8 @@ fn main() {
     };
 
     if args.len() >= 2 {
-        editor_open(&args[1]);
+        let path = Path::new(&args[1]);
+        editor_open(path);
     }
 
     loop {
