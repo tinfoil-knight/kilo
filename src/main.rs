@@ -442,7 +442,9 @@ fn editor_process_keypress() {
             ECFG.cx = 0;
         },
         EditorKey::End => unsafe {
-            ECFG.cx = ECFG.screencols.saturating_sub(1);
+            if ECFG.cy < ECFG.numrows {
+                ECFG.cx = ECFG.rows[ECFG.cy].len();
+            }
         },
         _ => {}
     }
