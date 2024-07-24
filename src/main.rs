@@ -7,6 +7,7 @@ use std::{
     mem,
     path::Path,
     process::exit,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use libc::{
@@ -29,6 +30,8 @@ struct EditorConfig {
     numrows: usize,
     rows: Vec<String>,
     filename: Option<String>,
+    statusmsg: String,
+    statusmsg_t: SystemTime,
 }
 
 static mut ECFG: EditorConfig = EditorConfig {
@@ -42,6 +45,8 @@ static mut ECFG: EditorConfig = EditorConfig {
     col_offset: 0,
     rows: Vec::new(),
     filename: None,
+    statusmsg: String::new(),
+    statusmsg_t: UNIX_EPOCH,
 };
 
 const KILO_VERSION: &str = "0.0.1";
@@ -361,6 +366,23 @@ fn editor_draw_status_bar(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     }
 
     w.write_all(b"\x1b[m")?; // switch back to normal formatting
+
+    w.write_all(b"\r\n")?;
+
+    // message_bar
+    w.write_all(b"\x1b[K")?;
+    let msglen = unsafe { min(ECFG.statusmsg.len(), ECFG.screencols) };
+
+    if msglen > 0
+        && SystemTime::now()
+            .duration_since(unsafe { ECFG.statusmsg_t })
+            .unwrap()
+            .as_secs()
+            < 5
+    {
+        w.write_all(unsafe { ECFG.statusmsg.as_bytes() })?;
+    }
+
     Ok(())
 }
 
@@ -390,6 +412,13 @@ fn editor_refresh_screen() -> io::Result<()> {
     w.flush()?;
 
     Ok(())
+}
+
+fn editor_set_status_message(msg: &str) {
+    unsafe {
+        ECFG.statusmsg = msg.to_owned();
+        ECFG.statusmsg_t = SystemTime::now();
+    }
 }
 
 // input
@@ -492,8 +521,8 @@ fn editor_process_keypress() {
 fn init_editor() -> io::Result<()> {
     unsafe {
         (ECFG.screenrows, ECFG.screencols) = get_window_size()?;
-        // assign 1 line on the screen for the status bar
-        ECFG.screenrows -= 1;
+        // assign 2 lines on the screen for the status bar
+        ECFG.screenrows -= 2;
     }
     Ok(())
 }
@@ -512,6 +541,8 @@ fn main() {
         let path = Path::new(&args[1]);
         editor_open(path);
     }
+
+    editor_set_status_message("HELP: Ctrl-Q = quit");
 
     loop {
         editor_refresh_screen().unwrap();
