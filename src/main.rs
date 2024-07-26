@@ -16,6 +16,8 @@ use libc::{
     VMIN, VTIME,
 };
 
+type Line = Vec<char>;
+
 struct EditorConfig {
     /// Initial terminal config
     orig_termios: termios,
@@ -28,7 +30,7 @@ struct EditorConfig {
     row_offset: usize,
     col_offset: usize,
     numrows: usize,
-    rows: Vec<String>,
+    rows: Vec<Line>,
     filename: Option<String>,
     statusmsg: String,
     statusmsg_t: SystemTime,
@@ -257,7 +259,7 @@ fn editor_open(path: &Path) {
     let reader = BufReader::new(file);
     for line in reader.lines() {
         unsafe {
-            ECFG.rows.push(line.unwrap());
+            ECFG.rows.push(line.unwrap().chars().collect());
             ECFG.numrows += 1;
         }
     }
@@ -305,7 +307,7 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
             let len = r.len().saturating_sub(col_offset).clamp(0, cols);
             let start = if len == 0 { 0 } else { col_offset };
             let end = start + len;
-            w.write_all(r[start..end].as_bytes())?;
+            w.write_all(r[start..end].iter().collect::<String>().as_bytes())?;
         }
 
         // K cmd - Erase in Line (erases part of current line)
