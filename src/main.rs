@@ -53,11 +53,12 @@ static mut ECFG: EditorConfig = EditorConfig {
 
 const KILO_VERSION: &str = "0.0.1";
 
-const fn ctrl_key(k: char) -> u8 {
+const fn ctrl_key(k: char) -> char {
     // when you press Ctrl in combination w/ other key in the terminal
     // a modified character is sent w/ bits 5 and 6 stripped (set to '0')
     // in the character corresponding to the key pressed
-    (k as u8) & 0x1f
+    let v = (k as u8) & 0x1f;
+    v as char
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -72,6 +73,7 @@ enum EditorKey {
     Home,
     End,
     Delete,
+    Backspace,
 }
 
 // terminal
@@ -194,6 +196,14 @@ fn editor_read_key() -> EditorKey {
         }
     }
 
+    if c as u8 == 127 {
+        // Even though in the ASCII table:
+        // 127 is mapped to Delete and 8 is mapped to Backspace,
+        // in modern computers the Backspace key is mapped to 127
+        // and Delete key is mapped to <esc>[3~
+        return EditorKey::Backspace;
+    }
+
     EditorKey::Char(c)
 }
 
@@ -241,6 +251,19 @@ fn get_window_size() -> io::Result<(usize, usize)> {
         }
 
         Ok((ws.ws_row.into(), ws.ws_col.into()))
+    }
+}
+
+// editor operations
+
+fn editor_insert_char(c: char) {
+    unsafe {
+        if ECFG.cy == ECFG.numrows {
+            ECFG.rows.push(vec![]);
+            ECFG.numrows += 1;
+        }
+        ECFG.rows[ECFG.cy].insert(ECFG.cx, c);
+        ECFG.cx += 1
     }
 }
 
@@ -474,8 +497,13 @@ fn editor_move_cursor(key: EditorKey) {
 }
 
 fn editor_process_keypress() {
+    const CTRL_H: char = ctrl_key('h');
+    const CTRL_L: char = ctrl_key('l');
+    const CTRL_Q: char = ctrl_key('q');
+
     match editor_read_key() {
-        EditorKey::Char(c) if (c as u8) == ctrl_key('q') => {
+        EditorKey::Char('\r') => {}
+        EditorKey::Char(CTRL_Q) => {
             editor_clear_screen();
             exit(0);
         }
@@ -514,7 +542,13 @@ fn editor_process_keypress() {
                 ECFG.cx = ECFG.rows[ECFG.cy].len();
             }
         },
-        _ => {}
+        EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H) => {
+            // TODO
+        }
+        EditorKey::Char('\x1b') | EditorKey::Char(CTRL_L) => {}
+        EditorKey::Char(c) => {
+            editor_insert_char(c);
+        }
     }
 }
 
