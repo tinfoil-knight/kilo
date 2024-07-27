@@ -34,6 +34,8 @@ struct EditorConfig {
     filename: Option<String>,
     statusmsg: String,
     statusmsg_t: SystemTime,
+    dirty: usize,
+    quit: bool,
 }
 
 static mut ECFG: EditorConfig = EditorConfig {
@@ -49,6 +51,8 @@ static mut ECFG: EditorConfig = EditorConfig {
     filename: None,
     statusmsg: String::new(),
     statusmsg_t: UNIX_EPOCH,
+    dirty: 0,
+    quit: false,
 };
 
 const KILO_VERSION: &str = "0.0.1";
@@ -263,7 +267,8 @@ fn editor_insert_char(c: char) {
             ECFG.numrows += 1;
         }
         ECFG.rows[ECFG.cy].insert(ECFG.cx, c);
-        ECFG.cx += 1
+        ECFG.cx += 1;
+        ECFG.dirty += 1;
     }
 }
 
@@ -288,6 +293,7 @@ fn editor_del_char() {
             ECFG.numrows -= 1;
             ECFG.cy -= 1;
         }
+        ECFG.dirty += 1;
     }
 }
 
@@ -321,11 +327,13 @@ fn editor_save() {
 
         let s = ECFG.rows.join(&'\n').iter().collect::<String>();
         let path = Path::new(fname);
-        let msg = match fs::write(path, &s) {
-            Ok(_) => format!("{} bytes written to disk", s.len()),
-            Err(e) => format!("Can't save! I/O error: {}", e),
+        match fs::write(path, &s) {
+            Ok(_) => {
+                editor_set_status_message(&format!("{} bytes written to disk", s.len()));
+                ECFG.dirty = 0;
+            }
+            Err(e) => editor_set_status_message(&format!("Can't save! I/O error: {}", e)),
         };
-        editor_set_status_message(&msg);
     }
 }
 
@@ -414,7 +422,16 @@ fn editor_draw_status_bar(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     };
 
     let cols = unsafe { ECFG.screencols };
-    let status = format!("{:.20} - {} lines", fname, unsafe { ECFG.numrows });
+    let status = format!(
+        "{:.20} - {} lines {}",
+        fname,
+        unsafe { ECFG.numrows },
+        if unsafe { ECFG.dirty } > 0 {
+            "(modified)"
+        } else {
+            ""
+        }
+    );
     let mut len = min(cols, status.len());
     let rstatus = format!("{}:{}", unsafe { ECFG.cy + 1 }, unsafe { ECFG.cx + 1 });
     let rlen = rstatus.len();
@@ -546,6 +563,15 @@ fn editor_process_keypress() {
     match editor_read_key() {
         EditorKey::Char('\r') => {}
         EditorKey::Char(CTRL_Q) => {
+            unsafe {
+                if ECFG.dirty > 0 && !ECFG.quit {
+                    editor_set_status_message(
+                        "WARNING!!! File has unsaved changes. Press Ctrl-Q once more to quit.",
+                    );
+                    ECFG.quit = true;
+                    return;
+                }
+            }
             editor_clear_screen();
             exit(0);
         }
@@ -598,6 +624,10 @@ fn editor_process_keypress() {
         EditorKey::Char(c) => {
             editor_insert_char(c);
         }
+    }
+
+    unsafe {
+        ECFG.quit = false;
     }
 }
 
