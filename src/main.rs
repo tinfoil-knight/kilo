@@ -267,6 +267,30 @@ fn editor_insert_char(c: char) {
     }
 }
 
+fn editor_del_char() {
+    unsafe {
+        if ECFG.cy == ECFG.numrows || ECFG.cx == 0 && ECFG.cy == 0 {
+            return;
+        }
+
+        let row = &mut ECFG.rows[ECFG.cy];
+        if ECFG.cx > 0 {
+            let pos = ECFG.cx - 1;
+            if pos >= row.len() {
+                return;
+            }
+            row.remove(pos);
+            ECFG.cx -= 1
+        } else {
+            ECFG.cx = ECFG.rows[ECFG.cy - 1].len();
+            ECFG.rows[ECFG.cy - 1].append(&mut ECFG.rows[ECFG.cy]);
+            ECFG.rows.remove(ECFG.cy);
+            ECFG.numrows -= 1;
+            ECFG.cy -= 1;
+        }
+    }
+}
+
 // file i/o
 
 fn editor_open(path: &Path) {
@@ -563,8 +587,12 @@ fn editor_process_keypress() {
                 ECFG.cx = ECFG.rows[ECFG.cy].len();
             }
         },
-        EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H) => {
-            // TODO
+        c @ (EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H)) => {
+            // Delete is triggered through fn + delete on the Mac keyboard
+            if c == EditorKey::Delete {
+                editor_move_cursor(EditorKey::ArrowRight);
+            }
+            editor_del_char();
         }
         EditorKey::Char('\x1b') | EditorKey::Char(CTRL_L) => {}
         EditorKey::Char(c) => {
