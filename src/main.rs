@@ -340,9 +340,18 @@ fn editor_open(path: &Path) {
 
 fn editor_save() {
     unsafe {
-        let Some(fname) = &ECFG.filename else {
-            // TODO
-            return;
+        let fname = match &ECFG.filename {
+            Some(fname) => fname,
+            None => {
+                ECFG.filename = editor_prompt("Save as: {} (ESC to cancel)");
+                match &ECFG.filename {
+                    Some(fname) => fname,
+                    None => {
+                        editor_set_status_message("Save aborted");
+                        return;
+                    }
+                }
+            }
         };
 
         let s = ECFG.rows.join(&'\n').iter().collect::<String>();
@@ -526,6 +535,42 @@ fn editor_set_status_message(msg: &str) {
 
 // input
 
+fn dyn_fmt<T: Display>(fmt_str: &str, args: &[T]) -> String {
+    let mut s = String::new();
+    for arg in args {
+        s = fmt_str.replacen("{}", &arg.to_string(), 1);
+    }
+    s
+}
+
+fn editor_prompt(prompt: &str) -> Option<String> {
+    let mut buf = String::new();
+
+    loop {
+        let msg = dyn_fmt(prompt, &[&buf]);
+        editor_set_status_message(&msg);
+        editor_refresh_screen().unwrap();
+
+        match editor_read_key() {
+            EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H) => {
+                if !buf.is_empty() {
+                    buf.pop();
+                }
+            }
+            EditorKey::Char('\x1b') => {
+                editor_set_status_message("");
+                return None;
+            }
+            EditorKey::Char('\r') => {
+                editor_set_status_message("");
+                return Some(buf);
+            }
+            EditorKey::Char(c) if !c.is_control() => buf.push(c),
+            _ => {}
+        };
+    }
+}
+
 fn editor_move_cursor(key: EditorKey) {
     unsafe {
         let row = if ECFG.cy >= ECFG.rows.len() {
@@ -574,12 +619,12 @@ fn editor_move_cursor(key: EditorKey) {
     }
 }
 
-fn editor_process_keypress() {
-    const CTRL_H: char = ctrl_key('h');
-    const CTRL_L: char = ctrl_key('l');
-    const CTRL_Q: char = ctrl_key('q');
-    const CTRL_S: char = ctrl_key('s');
+const CTRL_H: char = ctrl_key('h');
+const CTRL_L: char = ctrl_key('l');
+const CTRL_Q: char = ctrl_key('q');
+const CTRL_S: char = ctrl_key('s');
 
+fn editor_process_keypress() {
     match editor_read_key() {
         EditorKey::Char('\r') => editor_insert_newline(),
         EditorKey::Char(CTRL_Q) => {
