@@ -2,7 +2,7 @@ use std::{
     cmp::min,
     env,
     fmt::Display,
-    fs::File,
+    fs::{self, File},
     io::{self, BufRead, BufReader, BufWriter, Read, Stdout, Write},
     mem,
     path::Path,
@@ -288,6 +288,23 @@ fn editor_open(path: &Path) {
     }
 }
 
+fn editor_save() {
+    unsafe {
+        let Some(fname) = &ECFG.filename else {
+            // TODO
+            return;
+        };
+
+        let s = ECFG.rows.join(&'\n').iter().collect::<String>();
+        let path = Path::new(fname);
+        let msg = match fs::write(path, &s) {
+            Ok(_) => format!("{} bytes written to disk", s.len()),
+            Err(e) => format!("Can't save! I/O error: {}", e),
+        };
+        editor_set_status_message(&msg);
+    }
+}
+
 // output
 
 fn editor_clear_screen() {
@@ -500,12 +517,16 @@ fn editor_process_keypress() {
     const CTRL_H: char = ctrl_key('h');
     const CTRL_L: char = ctrl_key('l');
     const CTRL_Q: char = ctrl_key('q');
+    const CTRL_S: char = ctrl_key('s');
 
     match editor_read_key() {
         EditorKey::Char('\r') => {}
         EditorKey::Char(CTRL_Q) => {
             editor_clear_screen();
             exit(0);
+        }
+        EditorKey::Char(CTRL_S) => {
+            editor_save();
         }
         c @ (EditorKey::PageUp | EditorKey::PageDown) => unsafe {
             if c == EditorKey::PageUp {
@@ -578,7 +599,7 @@ fn main() {
         editor_open(path);
     }
 
-    editor_set_status_message("HELP: Ctrl-Q = quit");
+    editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit");
 
     loop {
         editor_refresh_screen().unwrap();
