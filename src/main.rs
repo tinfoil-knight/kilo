@@ -258,14 +258,39 @@ fn get_window_size() -> io::Result<(usize, usize)> {
 
 // editor operations
 
+fn editor_insert_row(at: usize, row: Line) {
+    unsafe {
+        if at > ECFG.rows.len() {
+            return;
+        }
+        ECFG.rows.insert(at, row);
+        ECFG.dirty += 1;
+    }
+}
+
 fn editor_insert_char(c: char) {
     unsafe {
         if ECFG.cy == ECFG.rows.len() {
             ECFG.rows.push(vec![]);
+            editor_insert_row(ECFG.rows.len(), vec![]);
         }
         ECFG.rows[ECFG.cy].insert(ECFG.cx, c);
         ECFG.cx += 1;
         ECFG.dirty += 1;
+    }
+}
+
+fn editor_insert_newline() {
+    unsafe {
+        if ECFG.cx == 0 {
+            editor_insert_row(ECFG.cy, vec![]);
+        } else {
+            let row = &ECFG.rows[ECFG.cy];
+            editor_insert_row(ECFG.cy + 1, row[ECFG.cx..].to_vec());
+            ECFG.rows[ECFG.cy] = row[..ECFG.cx].to_vec()
+        }
+        ECFG.cy += 1;
+        ECFG.cx = 0;
     }
 }
 
@@ -556,7 +581,7 @@ fn editor_process_keypress() {
     const CTRL_S: char = ctrl_key('s');
 
     match editor_read_key() {
-        EditorKey::Char('\r') => {}
+        EditorKey::Char('\r') => editor_insert_newline(),
         EditorKey::Char(CTRL_Q) => {
             unsafe {
                 if ECFG.dirty > 0 && !ECFG.quit {
@@ -570,9 +595,7 @@ fn editor_process_keypress() {
             editor_clear_screen();
             exit(0);
         }
-        EditorKey::Char(CTRL_S) => {
-            editor_save();
-        }
+        EditorKey::Char(CTRL_S) => editor_save(),
         c @ (EditorKey::PageUp | EditorKey::PageDown) => unsafe {
             if c == EditorKey::PageUp {
                 ECFG.cy = ECFG.row_offset
@@ -597,9 +620,7 @@ fn editor_process_keypress() {
         c @ (EditorKey::ArrowUp
         | EditorKey::ArrowDown
         | EditorKey::ArrowLeft
-        | EditorKey::ArrowRight) => {
-            editor_move_cursor(c);
-        }
+        | EditorKey::ArrowRight) => editor_move_cursor(c),
         EditorKey::Home => unsafe {
             ECFG.cx = 0;
         },
@@ -616,9 +637,7 @@ fn editor_process_keypress() {
             editor_del_char();
         }
         EditorKey::Char('\x1b') | EditorKey::Char(CTRL_L) => {}
-        EditorKey::Char(c) => {
-            editor_insert_char(c);
-        }
+        EditorKey::Char(c) => editor_insert_char(c),
     }
 
     unsafe {
