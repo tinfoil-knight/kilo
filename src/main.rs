@@ -29,7 +29,6 @@ struct EditorConfig {
     cy: usize,
     row_offset: usize,
     col_offset: usize,
-    numrows: usize,
     rows: Vec<Line>,
     filename: Option<String>,
     statusmsg: String,
@@ -44,7 +43,6 @@ static mut ECFG: EditorConfig = EditorConfig {
     screencols: 0,
     cx: 0,
     cy: 0,
-    numrows: 0,
     row_offset: 0,
     col_offset: 0,
     rows: Vec::new(),
@@ -262,9 +260,8 @@ fn get_window_size() -> io::Result<(usize, usize)> {
 
 fn editor_insert_char(c: char) {
     unsafe {
-        if ECFG.cy == ECFG.numrows {
+        if ECFG.cy == ECFG.rows.len() {
             ECFG.rows.push(vec![]);
-            ECFG.numrows += 1;
         }
         ECFG.rows[ECFG.cy].insert(ECFG.cx, c);
         ECFG.cx += 1;
@@ -274,7 +271,7 @@ fn editor_insert_char(c: char) {
 
 fn editor_del_char() {
     unsafe {
-        if ECFG.cy == ECFG.numrows || ECFG.cx == 0 && ECFG.cy == 0 {
+        if ECFG.cy == ECFG.rows.len() || ECFG.cx == 0 && ECFG.cy == 0 {
             return;
         }
 
@@ -290,7 +287,6 @@ fn editor_del_char() {
             ECFG.cx = ECFG.rows[ECFG.cy - 1].len();
             ECFG.rows[ECFG.cy - 1].append(&mut ECFG.rows[ECFG.cy]);
             ECFG.rows.remove(ECFG.cy);
-            ECFG.numrows -= 1;
             ECFG.cy -= 1;
         }
         ECFG.dirty += 1;
@@ -313,7 +309,6 @@ fn editor_open(path: &Path) {
     for line in reader.lines() {
         unsafe {
             ECFG.rows.push(line.unwrap().chars().collect());
-            ECFG.numrows += 1;
         }
     }
 }
@@ -354,7 +349,7 @@ fn editor_clear_screen() {
 
 fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     let (rows, cols) = unsafe { (ECFG.screenrows, ECFG.screencols) };
-    let numrows = unsafe { ECFG.numrows };
+    let numrows = unsafe { ECFG.rows.len() };
     let (row_offset, col_offset) = unsafe { (ECFG.row_offset, ECFG.col_offset) };
 
     for y in 0..rows {
@@ -425,7 +420,7 @@ fn editor_draw_status_bar(w: &mut BufWriter<Stdout>) -> io::Result<()> {
     let status = format!(
         "{:.20} - {} lines {}",
         fname,
-        unsafe { ECFG.numrows },
+        unsafe { ECFG.rows.len() },
         if unsafe { ECFG.dirty } > 0 {
             "(modified)"
         } else {
@@ -508,7 +503,7 @@ fn editor_set_status_message(msg: &str) {
 
 fn editor_move_cursor(key: EditorKey) {
     unsafe {
-        let row = if ECFG.cy >= ECFG.numrows {
+        let row = if ECFG.cy >= ECFG.rows.len() {
             None
         } else {
             Some(&ECFG.rows[ECFG.cy])
@@ -536,13 +531,13 @@ fn editor_move_cursor(key: EditorKey) {
                 }
             }
             EditorKey::ArrowUp => ECFG.cy = ECFG.cy.saturating_sub(1),
-            EditorKey::ArrowDown if ECFG.cy < ECFG.numrows => ECFG.cy += 1,
+            EditorKey::ArrowDown if ECFG.cy < ECFG.rows.len() => ECFG.cy += 1,
             _ => {}
         }
 
         // snap cursor to end of line
 
-        let row = if ECFG.cy >= ECFG.numrows {
+        let row = if ECFG.cy >= ECFG.rows.len() {
             None
         } else {
             Some(&ECFG.rows[ECFG.cy])
@@ -583,8 +578,8 @@ fn editor_process_keypress() {
                 ECFG.cy = ECFG.row_offset
             } else {
                 ECFG.cy = ECFG.row_offset + ECFG.screenrows - 1;
-                if ECFG.cy > ECFG.numrows {
-                    ECFG.cy = ECFG.numrows
+                if ECFG.cy > ECFG.rows.len() {
+                    ECFG.cy = ECFG.rows.len()
                 };
             }
 
@@ -609,7 +604,7 @@ fn editor_process_keypress() {
             ECFG.cx = 0;
         },
         EditorKey::End => unsafe {
-            if ECFG.cy < ECFG.numrows {
+            if ECFG.cy < ECFG.rows.len() {
                 ECFG.cx = ECFG.rows[ECFG.cy].len();
             }
         },
