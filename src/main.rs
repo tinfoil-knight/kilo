@@ -366,6 +366,28 @@ fn editor_save() {
     }
 }
 
+// find
+
+fn editor_find() {
+    let query = match editor_prompt("Search: {} (ESC to cancel)") {
+        Some(q) => q,
+        None => return,
+    };
+
+    for (yidx, row) in unsafe { ECFG.rows.iter().enumerate() } {
+        let s = row.iter().collect::<String>();
+        if let Some(xidx) = s.find(&query) {
+            unsafe {
+                ECFG.cy = yidx;
+                ECFG.cx = xidx;
+                ECFG.row_offset = ECFG.rows.len();
+            }
+
+            break;
+        }
+    }
+}
+
 // output
 
 fn editor_clear_screen() {
@@ -619,6 +641,7 @@ fn editor_move_cursor(key: EditorKey) {
     }
 }
 
+const CTRL_F: char = ctrl_key('f');
 const CTRL_H: char = ctrl_key('h');
 const CTRL_L: char = ctrl_key('l');
 const CTRL_Q: char = ctrl_key('q');
@@ -641,6 +664,7 @@ fn editor_process_keypress() {
             exit(0);
         }
         EditorKey::Char(CTRL_S) => editor_save(),
+        EditorKey::Char(CTRL_F) => editor_find(),
         c @ (EditorKey::PageUp | EditorKey::PageDown) => unsafe {
             if c == EditorKey::PageUp {
                 ECFG.cy = ECFG.row_offset
@@ -716,7 +740,7 @@ fn main() {
         editor_open(path);
     }
 
-    editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit");
+    editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
     loop {
         editor_refresh_screen().unwrap();
