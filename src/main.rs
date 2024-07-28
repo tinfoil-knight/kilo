@@ -343,7 +343,7 @@ fn editor_save() {
         let fname = match &ECFG.filename {
             Some(fname) => fname,
             None => {
-                ECFG.filename = editor_prompt("Save as: {} (ESC to cancel)");
+                ECFG.filename = editor_prompt("Save as: {} (ESC to cancel)", None);
                 match &ECFG.filename {
                     Some(fname) => fname,
                     None => {
@@ -369,23 +369,26 @@ fn editor_save() {
 // find
 
 fn editor_find() {
-    let query = match editor_prompt("Search: {} (ESC to cancel)") {
-        Some(q) => q,
-        None => return,
+    let cb = |query: &str, key: EditorKey| {
+        match key {
+            EditorKey::Char('\r') | EditorKey::Char('\x1b') => return,
+            _ => {}
+        };
+
+        for (yidx, row) in unsafe { ECFG.rows.iter().enumerate() } {
+            let s = row.iter().collect::<String>();
+            if let Some(xidx) = s.find(query) {
+                unsafe {
+                    ECFG.cy = yidx;
+                    ECFG.cx = xidx;
+                    ECFG.row_offset = ECFG.rows.len();
+                }
+                break;
+            }
+        }
     };
 
-    for (yidx, row) in unsafe { ECFG.rows.iter().enumerate() } {
-        let s = row.iter().collect::<String>();
-        if let Some(xidx) = s.find(&query) {
-            unsafe {
-                ECFG.cy = yidx;
-                ECFG.cx = xidx;
-                ECFG.row_offset = ECFG.rows.len();
-            }
-
-            break;
-        }
-    }
+    editor_prompt("Search: {} (ESC to cancel)", Some(cb));
 }
 
 // output
@@ -565,7 +568,8 @@ fn dyn_fmt<T: Display>(fmt_str: &str, args: &[T]) -> String {
     s
 }
 
-fn editor_prompt(prompt: &str) -> Option<String> {
+#[allow(clippy::option_map_unit_fn)]
+fn editor_prompt(prompt: &str, callback: Option<fn(&str, EditorKey)>) -> Option<String> {
     let mut buf = String::new();
 
     loop {
@@ -573,7 +577,9 @@ fn editor_prompt(prompt: &str) -> Option<String> {
         editor_set_status_message(&msg);
         editor_refresh_screen().unwrap();
 
-        match editor_read_key() {
+        let ch = editor_read_key();
+
+        match ch {
             EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H) => {
                 if !buf.is_empty() {
                     buf.pop();
@@ -581,15 +587,19 @@ fn editor_prompt(prompt: &str) -> Option<String> {
             }
             EditorKey::Char('\x1b') => {
                 editor_set_status_message("");
+                callback.map(|cb| cb(&buf, ch));
                 return None;
             }
             EditorKey::Char('\r') => {
                 editor_set_status_message("");
+                callback.map(|cb| cb(&buf, ch));
                 return Some(buf);
             }
             EditorKey::Char(c) if !c.is_control() => buf.push(c),
             _ => {}
         };
+
+        callback.map(|cb| cb(&buf, ch));
     }
 }
 
