@@ -388,7 +388,14 @@ fn editor_find() {
         }
     };
 
-    editor_prompt("Search: {} (ESC to cancel)", Some(cb));
+    let (cx, cy, coloff, rowoff) = unsafe { (ECFG.cx, ECFG.cy, ECFG.col_offset, ECFG.row_offset) };
+
+    if editor_prompt("Search: {} (ESC to cancel)", Some(cb)).is_none() {
+        unsafe {
+            (ECFG.cx, ECFG.cy) = (cx, cy);
+            (ECFG.col_offset, ECFG.row_offset) = (coloff, rowoff);
+        }
+    };
 }
 
 // output
