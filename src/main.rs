@@ -35,6 +35,8 @@ struct EditorConfig {
     statusmsg_t: SystemTime,
     dirty: usize,
     quit: bool,
+    last_match: i8,
+    direction: i8,
 }
 
 static mut ECFG: EditorConfig = EditorConfig {
@@ -51,6 +53,8 @@ static mut ECFG: EditorConfig = EditorConfig {
     statusmsg_t: UNIX_EPOCH,
     dirty: 0,
     quit: false,
+    last_match: -1,
+    direction: 1,
 };
 
 const KILO_VERSION: &str = "0.0.1";
@@ -371,15 +375,47 @@ fn editor_save() {
 fn editor_find() {
     let cb = |query: &str, key: EditorKey| {
         match key {
-            EditorKey::Char('\r') | EditorKey::Char('\x1b') => return,
-            _ => {}
+            EditorKey::Char('\r') | EditorKey::Char('\x1b') => unsafe {
+                ECFG.last_match = -1;
+                ECFG.direction = 1;
+                return;
+            },
+            EditorKey::ArrowRight | EditorKey::ArrowDown => unsafe {
+                ECFG.direction = 1;
+            },
+            EditorKey::ArrowLeft | EditorKey::ArrowUp => unsafe {
+                ECFG.direction = -1;
+            },
+            _ => unsafe {
+                ECFG.last_match = -1;
+                ECFG.direction = 1;
+            },
         };
 
-        for (yidx, row) in unsafe { ECFG.rows.iter().enumerate() } {
+        unsafe {
+            if ECFG.last_match == -1 {
+                ECFG.direction = 1;
+            }
+        }
+
+        let mut current = unsafe { ECFG.last_match };
+
+        for _ in 0..unsafe { ECFG.rows.len() } {
+            unsafe {
+                current += ECFG.direction;
+                if current == -1 {
+                    current = ECFG.rows.len() as i8 - 1;
+                } else if current == ECFG.rows.len() as i8 {
+                    current = 0;
+                }
+            }
+
+            let row = unsafe { &ECFG.rows[current as usize] };
             let s = row.iter().collect::<String>();
             if let Some(xidx) = s.find(query) {
                 unsafe {
-                    ECFG.cy = yidx;
+                    ECFG.last_match = current;
+                    ECFG.cy = current as usize;
                     ECFG.cx = xidx;
                     ECFG.row_offset = ECFG.rows.len();
                 }
@@ -390,7 +426,7 @@ fn editor_find() {
 
     let (cx, cy, coloff, rowoff) = unsafe { (ECFG.cx, ECFG.cy, ECFG.col_offset, ECFG.row_offset) };
 
-    if editor_prompt("Search: {} (ESC to cancel)", Some(cb)).is_none() {
+    if editor_prompt("Search: {} (ESC/Arrows/Enter)", Some(cb)).is_none() {
         unsafe {
             (ECFG.cx, ECFG.cy) = (cx, cy);
             (ECFG.col_offset, ECFG.row_offset) = (coloff, rowoff);
