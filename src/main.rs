@@ -16,17 +16,81 @@ use libc::{
     VMIN, VTIME,
 };
 
-type Line = Vec<char>;
+struct Line {
+    chars: Vec<char>,
+    render: Vec<char>,
+}
+
+impl Line {
+    fn rsize(&self) -> usize {
+        self.render.len()
+    }
+
+    fn size(&self) -> usize {
+        self.chars.len()
+    }
+
+    fn update(&mut self) {
+        let mut idx = 0;
+        // NOTE: This doesn't change the allocated capacity
+        // so if the line was large earlier and became smaller, it'd still use the same capacity
+        self.render.clear();
+
+        for ch in &self.chars {
+            if *ch == '\t' {
+                self.render.push(' ');
+                idx += 1;
+                while idx % KILO_TAB_STOP != 0 {
+                    self.render.push(' ');
+                    idx += 1;
+                }
+            } else {
+                self.render.push(ch.to_owned());
+                idx += 1
+            }
+        }
+    }
+
+    fn cx_to_rx(&self, cx: usize) -> usize {
+        let mut rx = 0;
+        for i in 0..cx {
+            if self.chars[i] == '\t' {
+                rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+            }
+            rx += 1
+        }
+        rx
+    }
+
+    fn rx_to_cx(&self, rx: usize) -> usize {
+        let mut cur_rx = 0;
+        let mut cx = 0;
+        while cx < self.size() {
+            if self.chars[cx] == '\t' {
+                cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
+            }
+            cur_rx += 1;
+
+            if cur_rx > rx {
+                return cx;
+            }
+            cx += 1;
+        }
+        cx
+    }
+}
 
 struct EditorConfig {
     /// Initial terminal config
     orig_termios: termios,
     screenrows: usize,
     screencols: usize,
-    /// Cursor X coordinate
+    /// Cursor X coordinate (for chars)
     cx: usize,
     /// Cursor Y coordinate
     cy: usize,
+    /// Cursor X coordinate (for render)
+    rx: usize,
     row_offset: usize,
     col_offset: usize,
     rows: Vec<Line>,
@@ -45,6 +109,7 @@ static mut ECFG: EditorConfig = EditorConfig {
     screencols: 0,
     cx: 0,
     cy: 0,
+    rx: 0,
     row_offset: 0,
     col_offset: 0,
     rows: Vec::new(),
@@ -58,6 +123,7 @@ static mut ECFG: EditorConfig = EditorConfig {
 };
 
 const KILO_VERSION: &str = "0.0.1";
+const KILO_TAB_STOP: usize = 4;
 
 const fn ctrl_key(k: char) -> char {
     // when you press Ctrl in combination w/ other key in the terminal
@@ -262,12 +328,19 @@ fn get_window_size() -> io::Result<(usize, usize)> {
 
 // editor operations
 
-fn editor_insert_row(at: usize, row: Line) {
+fn editor_insert_row(at: usize, row: Vec<char>) {
     unsafe {
         if at > ECFG.rows.len() {
             return;
         }
-        ECFG.rows.insert(at, row);
+        ECFG.rows.insert(
+            at,
+            Line {
+                chars: row,
+                render: vec![],
+            },
+        );
+        ECFG.rows[at].update();
         ECFG.dirty += 1;
     }
 }
@@ -275,10 +348,10 @@ fn editor_insert_row(at: usize, row: Line) {
 fn editor_insert_char(c: char) {
     unsafe {
         if ECFG.cy == ECFG.rows.len() {
-            ECFG.rows.push(vec![]);
             editor_insert_row(ECFG.rows.len(), vec![]);
         }
-        ECFG.rows[ECFG.cy].insert(ECFG.cx, c);
+        ECFG.rows[ECFG.cy].chars.insert(ECFG.cx, c);
+        ECFG.rows[ECFG.cy].update();
         ECFG.cx += 1;
         ECFG.dirty += 1;
     }
@@ -290,8 +363,9 @@ fn editor_insert_newline() {
             editor_insert_row(ECFG.cy, vec![]);
         } else {
             let row = &ECFG.rows[ECFG.cy];
-            editor_insert_row(ECFG.cy + 1, row[ECFG.cx..].to_vec());
-            ECFG.rows[ECFG.cy] = row[..ECFG.cx].to_vec()
+            editor_insert_row(ECFG.cy + 1, row.chars[ECFG.cx..].to_vec());
+            ECFG.rows[ECFG.cy].chars = row.chars[..ECFG.cx].to_vec();
+            ECFG.rows[ECFG.cy].update();
         }
         ECFG.cy += 1;
         ECFG.cx = 0;
@@ -300,21 +374,25 @@ fn editor_insert_newline() {
 
 fn editor_del_char() {
     unsafe {
-        if ECFG.cy == ECFG.rows.len() || ECFG.cx == 0 && ECFG.cy == 0 {
+        if ECFG.cy == ECFG.rows.len() || (ECFG.cx == 0 && ECFG.cy == 0) {
             return;
         }
 
         let row = &mut ECFG.rows[ECFG.cy];
         if ECFG.cx > 0 {
             let pos = ECFG.cx - 1;
-            if pos >= row.len() {
+            if pos >= row.size() {
                 return;
             }
-            row.remove(pos);
+            row.chars.remove(pos);
+            row.update();
             ECFG.cx -= 1
         } else {
-            ECFG.cx = ECFG.rows[ECFG.cy - 1].len();
-            ECFG.rows[ECFG.cy - 1].append(&mut ECFG.rows[ECFG.cy]);
+            ECFG.cx = ECFG.rows[ECFG.cy - 1].size();
+            ECFG.rows[ECFG.cy - 1]
+                .chars
+                .append(&mut ECFG.rows[ECFG.cy].chars);
+            ECFG.rows[ECFG.cy - 1].update();
             ECFG.rows.remove(ECFG.cy);
             ECFG.cy -= 1;
         }
@@ -335,9 +413,13 @@ fn editor_open(path: &Path) {
             .map(|os_str| os_str.to_str().unwrap().to_owned());
     };
     let reader = BufReader::new(file);
-    for line in reader.lines() {
+    for (i, line) in reader.lines().enumerate() {
         unsafe {
-            ECFG.rows.push(line.unwrap().chars().collect());
+            ECFG.rows.push(Line {
+                chars: line.unwrap().chars().collect(),
+                render: vec![],
+            });
+            ECFG.rows[i].update();
         }
     }
 }
@@ -358,11 +440,15 @@ fn editor_save() {
             }
         };
 
-        let s = ECFG.rows.join(&'\n').iter().collect::<String>();
+        let contents = ECFG
+            .rows
+            .iter()
+            .flat_map(|ln| ln.chars.iter().chain(std::iter::once(&'\n')))
+            .collect::<String>();
         let path = Path::new(fname);
-        match fs::write(path, &s) {
+        match fs::write(path, &contents) {
             Ok(_) => {
-                editor_set_status_message(&format!("{} bytes written to disk", s.len()));
+                editor_set_status_message(&format!("{} bytes written to disk", contents.len()));
                 ECFG.dirty = 0;
             }
             Err(e) => editor_set_status_message(&format!("Can't save! I/O error: {}", e)),
@@ -411,12 +497,12 @@ fn editor_find() {
             }
 
             let row = unsafe { &ECFG.rows[current as usize] };
-            let s = row.iter().collect::<String>();
+            let s = row.render.iter().collect::<String>();
             if let Some(xidx) = s.find(query) {
                 unsafe {
                     ECFG.last_match = current;
                     ECFG.cy = current as usize;
-                    ECFG.cx = xidx;
+                    ECFG.cx = row.rx_to_cx(xidx);
                     ECFG.row_offset = ECFG.rows.len();
                 }
                 break;
@@ -473,10 +559,10 @@ fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
             }
         } else {
             let r = unsafe { &ECFG.rows[filerow] };
-            let len = r.len().saturating_sub(col_offset).clamp(0, cols);
+            let len = r.rsize().saturating_sub(col_offset).clamp(0, cols);
             let start = if len == 0 { 0 } else { col_offset };
             let end = start + len;
-            w.write_all(r[start..end].iter().collect::<String>().as_bytes())?;
+            w.write_all(r.render[start..end].iter().collect::<String>().as_bytes())?;
         }
 
         // K cmd - Erase in Line (erases part of current line)
@@ -493,6 +579,14 @@ fn editor_scroll() {
         let (cx, cy) = (ECFG.cx, ECFG.cy);
         let (rows, cols) = (ECFG.screenrows, ECFG.screencols);
 
+        ECFG.rx = if cy < ECFG.rows.len() {
+            ECFG.rows[cy].cx_to_rx(cx)
+        } else {
+            0
+        };
+
+        let rx = ECFG.rx;
+
         if cy < ECFG.row_offset {
             ECFG.row_offset = cy;
         }
@@ -500,11 +594,11 @@ fn editor_scroll() {
             ECFG.row_offset = cy - rows + 1
         }
 
-        if cx < ECFG.col_offset {
-            ECFG.col_offset = cx
+        if rx < ECFG.col_offset {
+            ECFG.col_offset = rx
         }
-        if cx >= ECFG.col_offset + cols {
-            ECFG.col_offset = cx - cols + 1
+        if rx >= ECFG.col_offset + cols {
+            ECFG.col_offset = rx - cols + 1
         }
     }
 }
@@ -578,13 +672,14 @@ fn editor_refresh_screen() -> io::Result<()> {
     editor_draw_rows(&mut w)?;
     editor_draw_status_bar(&mut w)?;
 
-    let (cy, cx) = unsafe {
-        (
-            (ECFG.cy - ECFG.row_offset) + 1,
-            (ECFG.cx - ECFG.col_offset) + 1,
+    w.write_all(
+        format!(
+            "\x1b[{};{}H",
+            unsafe { ECFG.cy - ECFG.row_offset } + 1,
+            unsafe { ECFG.rx - ECFG.col_offset } + 1
         )
-    };
-    w.write_all(format!("\x1b[{};{}H", cy, cx).as_bytes())?;
+        .as_bytes(),
+    )?;
 
     // h cmd - Set mode
     w.write_all(b"\x1b[?25h")?; // show the cursor
@@ -660,12 +755,12 @@ fn editor_move_cursor(key: EditorKey) {
                     ECFG.cx -= 1
                 } else if ECFG.cy > 0 {
                     ECFG.cy -= 1;
-                    ECFG.cx = ECFG.rows[ECFG.cy].len();
+                    ECFG.cx = ECFG.rows[ECFG.cy].size();
                 }
             }
             EditorKey::ArrowRight => {
                 if let Some(row) = row {
-                    match ECFG.cx.cmp(&row.len()) {
+                    match ECFG.cx.cmp(&row.size()) {
                         std::cmp::Ordering::Less => ECFG.cx += 1,
                         std::cmp::Ordering::Equal => {
                             ECFG.cy += 1;
@@ -687,7 +782,7 @@ fn editor_move_cursor(key: EditorKey) {
         } else {
             Some(&ECFG.rows[ECFG.cy])
         };
-        let rowlen = if let Some(row) = row { row.len() } else { 0 };
+        let rowlen = if let Some(row) = row { row.size() } else { 0 };
         if ECFG.cx > rowlen {
             ECFG.cx = rowlen;
         }
@@ -748,7 +843,7 @@ fn editor_process_keypress() {
         },
         EditorKey::End => unsafe {
             if ECFG.cy < ECFG.rows.len() {
-                ECFG.cx = ECFG.rows[ECFG.cy].len();
+                ECFG.cx = ECFG.rows[ECFG.cy].size();
             }
         },
         c @ (EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H)) => {
