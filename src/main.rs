@@ -4,85 +4,20 @@ use std::{
     fmt::Display,
     fs::{self, File},
     io::{self, BufRead, BufReader, BufWriter, Read, Stdout, Write},
-    mem,
     path::Path,
     process::exit,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use libc::{
-    atexit, ioctl, tcgetattr, tcsetattr, termios, winsize, BRKINT, CS8, ECHO, ICANON, ICRNL,
-    IEXTEN, INPCK, ISIG, ISTRIP, IXON, OPOST, STDIN_FILENO, STDOUT_FILENO, TCSAFLUSH, TIOCGWINSZ,
-    VMIN, VTIME,
-};
+mod line;
+mod terminal;
 
-struct Line {
-    chars: Vec<char>,
-    render: Vec<char>,
-}
+use line::Line;
+use terminal::{clear_screen, die, enable_raw_mode, get_window_size};
 
-impl Line {
-    fn rsize(&self) -> usize {
-        self.render.len()
-    }
+const KILO_VERSION: &str = "0.0.1";
 
-    fn size(&self) -> usize {
-        self.chars.len()
-    }
-
-    fn update(&mut self) {
-        let mut idx = 0;
-        // NOTE: This doesn't change the allocated capacity
-        // so if the line was large earlier and became smaller, it'd still use the same capacity
-        self.render.clear();
-
-        for ch in &self.chars {
-            if *ch == '\t' {
-                self.render.push(' ');
-                idx += 1;
-                while idx % KILO_TAB_STOP != 0 {
-                    self.render.push(' ');
-                    idx += 1;
-                }
-            } else {
-                self.render.push(ch.to_owned());
-                idx += 1
-            }
-        }
-    }
-
-    fn cx_to_rx(&self, cx: usize) -> usize {
-        let mut rx = 0;
-        for i in 0..cx {
-            if self.chars[i] == '\t' {
-                rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
-            }
-            rx += 1
-        }
-        rx
-    }
-
-    fn rx_to_cx(&self, rx: usize) -> usize {
-        let mut cur_rx = 0;
-        let mut cx = 0;
-        while cx < self.size() {
-            if self.chars[cx] == '\t' {
-                cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
-            }
-            cur_rx += 1;
-
-            if cur_rx > rx {
-                return cx;
-            }
-            cx += 1;
-        }
-        cx
-    }
-}
-
-struct EditorConfig {
-    /// Initial terminal config
-    orig_termios: termios,
+struct Editor {
     screenrows: usize,
     screencols: usize,
     /// Cursor X coordinate (for chars)
@@ -102,28 +37,6 @@ struct EditorConfig {
     last_match: i8,
     direction: i8,
 }
-
-static mut ECFG: EditorConfig = EditorConfig {
-    orig_termios: unsafe { mem::zeroed() },
-    screenrows: 0,
-    screencols: 0,
-    cx: 0,
-    cy: 0,
-    rx: 0,
-    row_offset: 0,
-    col_offset: 0,
-    rows: Vec::new(),
-    filename: None,
-    statusmsg: String::new(),
-    statusmsg_t: UNIX_EPOCH,
-    dirty: 0,
-    quit: false,
-    last_match: -1,
-    direction: 1,
-};
-
-const KILO_VERSION: &str = "0.0.1";
-const KILO_TAB_STOP: usize = 4;
 
 const fn ctrl_key(k: char) -> char {
     // when you press Ctrl in combination w/ other key in the terminal
@@ -146,70 +59,6 @@ enum EditorKey {
     End,
     Delete,
     Backspace,
-}
-
-// terminal
-
-fn die<E: Display>(message: &str, error: E) -> ! {
-    editor_clear_screen();
-
-    eprintln!("{} : {}", message, error);
-    exit(1);
-}
-
-extern "C" fn disable_raw_mode() {
-    unsafe {
-        if tcsetattr(STDIN_FILENO, TCSAFLUSH, &ECFG.orig_termios) != 0 {
-            die("Failed to disable raw mode", io::Error::last_os_error());
-        };
-    }
-}
-
-fn enable_raw_mode() -> io::Result<()> {
-    // Ref: https://www.man7.org/linux/man-pages/man3/termios.3.html
-    unsafe {
-        if tcgetattr(STDIN_FILENO, &mut ECFG.orig_termios) != 0 {
-            return Err(io::Error::last_os_error());
-        };
-        if atexit(disable_raw_mode) != 0 {
-            return Err(io::Error::last_os_error());
-        };
-        let mut raw = ECFG.orig_termios;
-
-        // Input Flags:
-        // IXON - Enable XON/XOFF flow control (triggered through Ctrl+S, Ctrl+Q) on output.
-        // ICRNL - Translate carriage return to newline on input.
-        // BRKINT, ISTRIP, INPCK - Legacy flags.
-        raw.c_iflag &= !(IXON | ICRNL | BRKINT | ISTRIP | INPCK);
-
-        // Output Flags:
-        // OPOST - Enable implementation-defined output processing.
-        raw.c_oflag &= !(OPOST);
-
-        // Contrl Flags:
-        // CS8 - Sets character size to 8 bits.
-        raw.c_cflag |= CS8;
-
-        // Local Flags:
-        // ECHO - Echo input characters
-        // ICANON - Enable canonical mode (input is made available line by line)
-        // ISIG - Generate corresponding signal when Interrupt (Ctrl+C) or Suspend (Ctrl+Z) is received
-        // IEXTEN - Enable implementation-defined input processing (turning off stops discarding Ctrl+V, Ctrl+O etc.)
-        raw.c_lflag &= !(ECHO | ICANON | ISIG | IEXTEN);
-
-        // Control Characters:
-        // VMIN - sets min. no. of bytes of input needed before read can return
-        // VTIME - sets max. amount of time to wait to before read returns
-        raw.c_cc[VMIN] = 0;
-        raw.c_cc[VTIME] = 1;
-
-        // TCSAFLUSH - change occurs after all output has been transmitted &
-        // all input that has been received but not read will be discarded before the change is made
-        if tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0 {
-            return Err(io::Error::last_os_error());
-        };
-    }
-    Ok(())
 }
 
 fn read_char() -> io::Result<char> {
@@ -279,425 +128,6 @@ fn editor_read_key() -> EditorKey {
     EditorKey::Char(c)
 }
 
-fn write(buf: &[u8]) -> io::Result<()> {
-    io::stdout().lock().write_all(buf)
-}
-
-fn get_cursor_position() -> io::Result<(usize, usize)> {
-    // n cmd - Device Status Report
-    // arg 6 - ask for cursor position
-    write(b"\x1b[6n")?;
-    io::stdout().flush().unwrap();
-
-    let mut buf = Vec::new();
-    // Cursor Position Report: "<Esc>[rows;colsR"
-    io::stdin().lock().read_until(b'R', &mut buf)?;
-
-    match String::from_utf8(buf) {
-        Ok(v) => {
-            if v.starts_with(['\x1b', '[']) && v.ends_with('R') {
-                if let Some((rows, cols)) = &v[2..v.len() - 1].split_once(';') {
-                    match (rows.parse::<usize>(), cols.parse::<usize>()) {
-                        (Ok(rows), Ok(cols)) => return Ok((rows, cols)),
-                        _ => return Err(io::Error::other("failed to parse rows or cols")),
-                    }
-                };
-            }
-            Err(io::Error::other("invalid escape sequence"))
-        }
-        Err(e) => Err(io::Error::other(e)),
-    }
-}
-
-fn get_window_size() -> io::Result<(usize, usize)> {
-    unsafe {
-        let mut ws: winsize = mem::zeroed();
-        // TIOCGWINSZ - Get window size
-        if ioctl(STDOUT_FILENO, TIOCGWINSZ, &mut ws) == -1 || ws.ws_col == 0 {
-            // C cmd - Cursor Forward
-            // B cmd - Cursor Down
-            // Note: C, B cmds stop the cursor from going past the edge of the screen.
-            // We use a large argument to ensure that the cursor reaches the right-bottom edge of screen.
-            write(b"\x1b[999C\x1b[999B")?;
-            return get_cursor_position();
-        }
-
-        Ok((ws.ws_row.into(), ws.ws_col.into()))
-    }
-}
-
-// editor operations
-
-fn editor_insert_row(at: usize, row: Vec<char>) {
-    unsafe {
-        if at > ECFG.rows.len() {
-            return;
-        }
-        ECFG.rows.insert(
-            at,
-            Line {
-                chars: row,
-                render: vec![],
-            },
-        );
-        ECFG.rows[at].update();
-        ECFG.dirty += 1;
-    }
-}
-
-fn editor_insert_char(c: char) {
-    unsafe {
-        if ECFG.cy == ECFG.rows.len() {
-            editor_insert_row(ECFG.rows.len(), vec![]);
-        }
-        ECFG.rows[ECFG.cy].chars.insert(ECFG.cx, c);
-        ECFG.rows[ECFG.cy].update();
-        ECFG.cx += 1;
-        ECFG.dirty += 1;
-    }
-}
-
-fn editor_insert_newline() {
-    unsafe {
-        if ECFG.cx == 0 {
-            editor_insert_row(ECFG.cy, vec![]);
-        } else {
-            let row = &ECFG.rows[ECFG.cy];
-            editor_insert_row(ECFG.cy + 1, row.chars[ECFG.cx..].to_vec());
-            ECFG.rows[ECFG.cy].chars = row.chars[..ECFG.cx].to_vec();
-            ECFG.rows[ECFG.cy].update();
-        }
-        ECFG.cy += 1;
-        ECFG.cx = 0;
-    }
-}
-
-fn editor_del_char() {
-    unsafe {
-        if ECFG.cy == ECFG.rows.len() || (ECFG.cx == 0 && ECFG.cy == 0) {
-            return;
-        }
-
-        let row = &mut ECFG.rows[ECFG.cy];
-        if ECFG.cx > 0 {
-            let pos = ECFG.cx - 1;
-            if pos >= row.size() {
-                return;
-            }
-            row.chars.remove(pos);
-            row.update();
-            ECFG.cx -= 1
-        } else {
-            ECFG.cx = ECFG.rows[ECFG.cy - 1].size();
-            ECFG.rows[ECFG.cy - 1]
-                .chars
-                .append(&mut ECFG.rows[ECFG.cy].chars);
-            ECFG.rows[ECFG.cy - 1].update();
-            ECFG.rows.remove(ECFG.cy);
-            ECFG.cy -= 1;
-        }
-        ECFG.dirty += 1;
-    }
-}
-
-// file i/o
-
-fn editor_open(path: &Path) {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) => die("Could not open file", e),
-    };
-    unsafe {
-        ECFG.filename = path
-            .file_name()
-            .map(|os_str| os_str.to_str().unwrap().to_owned());
-    };
-    let reader = BufReader::new(file);
-    for (i, line) in reader.lines().enumerate() {
-        unsafe {
-            ECFG.rows.push(Line {
-                chars: line.unwrap().chars().collect(),
-                render: vec![],
-            });
-            ECFG.rows[i].update();
-        }
-    }
-}
-
-fn editor_save() {
-    unsafe {
-        let fname = match &ECFG.filename {
-            Some(fname) => fname,
-            None => {
-                ECFG.filename = editor_prompt("Save as: {} (ESC to cancel)", None);
-                match &ECFG.filename {
-                    Some(fname) => fname,
-                    None => {
-                        editor_set_status_message("Save aborted");
-                        return;
-                    }
-                }
-            }
-        };
-
-        let contents = ECFG
-            .rows
-            .iter()
-            .flat_map(|ln| ln.chars.iter().chain(std::iter::once(&'\n')))
-            .collect::<String>();
-        let path = Path::new(fname);
-        match fs::write(path, &contents) {
-            Ok(_) => {
-                editor_set_status_message(&format!("{} bytes written to disk", contents.len()));
-                ECFG.dirty = 0;
-            }
-            Err(e) => editor_set_status_message(&format!("Can't save! I/O error: {}", e)),
-        };
-    }
-}
-
-// find
-
-fn editor_find() {
-    let cb = |query: &str, key: EditorKey| {
-        match key {
-            EditorKey::Char('\r') | EditorKey::Char('\x1b') => unsafe {
-                ECFG.last_match = -1;
-                ECFG.direction = 1;
-                return;
-            },
-            EditorKey::ArrowRight | EditorKey::ArrowDown => unsafe {
-                ECFG.direction = 1;
-            },
-            EditorKey::ArrowLeft | EditorKey::ArrowUp => unsafe {
-                ECFG.direction = -1;
-            },
-            _ => unsafe {
-                ECFG.last_match = -1;
-                ECFG.direction = 1;
-            },
-        };
-
-        unsafe {
-            if ECFG.last_match == -1 {
-                ECFG.direction = 1;
-            }
-        }
-
-        let mut current = unsafe { ECFG.last_match };
-
-        for _ in 0..unsafe { ECFG.rows.len() } {
-            unsafe {
-                current += ECFG.direction;
-                if current == -1 {
-                    current = ECFG.rows.len() as i8 - 1;
-                } else if current == ECFG.rows.len() as i8 {
-                    current = 0;
-                }
-            }
-
-            let row = unsafe { &ECFG.rows[current as usize] };
-            let s = row.render.iter().collect::<String>();
-            if let Some(xidx) = s.find(query) {
-                unsafe {
-                    ECFG.last_match = current;
-                    ECFG.cy = current as usize;
-                    ECFG.cx = row.rx_to_cx(xidx);
-                    ECFG.row_offset = ECFG.rows.len();
-                }
-                break;
-            }
-        }
-    };
-
-    let (cx, cy, coloff, rowoff) = unsafe { (ECFG.cx, ECFG.cy, ECFG.col_offset, ECFG.row_offset) };
-
-    if editor_prompt("Search: {} (ESC/Arrows/Enter)", Some(cb)).is_none() {
-        unsafe {
-            (ECFG.cx, ECFG.cy) = (cx, cy);
-            (ECFG.col_offset, ECFG.row_offset) = (coloff, rowoff);
-        }
-    };
-}
-
-// output
-
-fn editor_clear_screen() {
-    // x1b -> 27 in decimal -> Ctrl + [ or <Esc> is an escape sequence.
-
-    // J command - Erase in Display (clear the screen)
-    // 2 is an argument to the J command that means "clear the entire screen".
-    print!("\x1b[2J");
-    // H command - Position the cursor.
-    // Default argument are 1,1 (row no., col no.).
-    // Note: Rows and Columns are numbered starting at 1 and not 0.
-    print!("\x1b[H");
-    io::stdout().flush().unwrap();
-}
-
-fn editor_draw_rows(w: &mut BufWriter<Stdout>) -> io::Result<()> {
-    let (rows, cols) = unsafe { (ECFG.screenrows, ECFG.screencols) };
-    let numrows = unsafe { ECFG.rows.len() };
-    let (row_offset, col_offset) = unsafe { (ECFG.row_offset, ECFG.col_offset) };
-
-    for y in 0..rows {
-        let filerow = y + row_offset;
-        if filerow >= numrows {
-            if numrows == 0 && y == rows / 3 {
-                let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
-                welcome_msg.truncate(cols);
-
-                let padding_len = (cols - welcome_msg.len()) / 2;
-                if padding_len > 0 {
-                    w.write_all(b"~")?;
-                    w.write_all(" ".repeat(padding_len - 1).as_bytes())?;
-                }
-
-                w.write_all(welcome_msg.as_bytes())?;
-            } else {
-                w.write_all(b"~")?;
-            }
-        } else {
-            let r = unsafe { &ECFG.rows[filerow] };
-            let len = r.rsize().saturating_sub(col_offset).clamp(0, cols);
-            let start = if len == 0 { 0 } else { col_offset };
-            let end = start + len;
-            w.write_all(r.render[start..end].iter().collect::<String>().as_bytes())?;
-        }
-
-        // K cmd - Erase in Line (erases part of current line)
-        // default arg is 0 which erases the part of the line to the right of the cursor.
-        w.write_all(b"\x1b[K")?;
-        w.write_all(b"\r\n")?;
-    }
-
-    Ok(())
-}
-
-fn editor_scroll() {
-    unsafe {
-        let (cx, cy) = (ECFG.cx, ECFG.cy);
-        let (rows, cols) = (ECFG.screenrows, ECFG.screencols);
-
-        ECFG.rx = if cy < ECFG.rows.len() {
-            ECFG.rows[cy].cx_to_rx(cx)
-        } else {
-            0
-        };
-
-        let rx = ECFG.rx;
-
-        if cy < ECFG.row_offset {
-            ECFG.row_offset = cy;
-        }
-        if cy >= ECFG.row_offset + rows {
-            ECFG.row_offset = cy - rows + 1
-        }
-
-        if rx < ECFG.col_offset {
-            ECFG.col_offset = rx
-        }
-        if rx >= ECFG.col_offset + cols {
-            ECFG.col_offset = rx - cols + 1
-        }
-    }
-}
-
-fn editor_draw_status_bar(w: &mut BufWriter<Stdout>) -> io::Result<()> {
-    // m cmd - Select Graphic Rendition
-    // arg 7 corresponds to inverted colors
-    w.write_all(b"\x1b[7m")?;
-    let fname = match unsafe { &ECFG.filename } {
-        Some(fname) => fname,
-        None => "[No Name]",
-    };
-
-    let cols = unsafe { ECFG.screencols };
-    let status = format!(
-        "{:.20} - {} lines {}",
-        fname,
-        unsafe { ECFG.rows.len() },
-        if unsafe { ECFG.dirty } > 0 {
-            "(modified)"
-        } else {
-            ""
-        }
-    );
-    let mut len = min(cols, status.len());
-    let rstatus = format!("{}:{}", unsafe { ECFG.cy + 1 }, unsafe { ECFG.cx + 1 });
-    let rlen = rstatus.len();
-
-    w.write_all(status[..len].as_bytes())?;
-
-    while len < cols {
-        if cols - len == rlen {
-            w.write_all(rstatus[..rlen].as_bytes())?;
-            break;
-        } else {
-            w.write_all(b" ")?;
-            len += 1;
-        }
-    }
-
-    w.write_all(b"\x1b[m")?; // switch back to normal formatting
-
-    w.write_all(b"\r\n")?;
-
-    // message_bar
-    w.write_all(b"\x1b[K")?;
-    let msglen = unsafe { min(ECFG.statusmsg.len(), ECFG.screencols) };
-
-    if msglen > 0
-        && SystemTime::now()
-            .duration_since(unsafe { ECFG.statusmsg_t })
-            .unwrap()
-            .as_secs()
-            < 5
-    {
-        w.write_all(unsafe { ECFG.statusmsg.as_bytes() })?;
-    }
-
-    Ok(())
-}
-
-fn editor_refresh_screen() -> io::Result<()> {
-    editor_scroll();
-
-    let mut w = io::BufWriter::new(io::stdout());
-
-    // l cmd - Reset mode
-    w.write_all(b"\x1b[?25l")?; // hide the cursor
-    w.write_all(b"\x1b[H")?; // reposition cursor to default position (1,1)
-
-    editor_draw_rows(&mut w)?;
-    editor_draw_status_bar(&mut w)?;
-
-    w.write_all(
-        format!(
-            "\x1b[{};{}H",
-            unsafe { ECFG.cy - ECFG.row_offset } + 1,
-            unsafe { ECFG.rx - ECFG.col_offset } + 1
-        )
-        .as_bytes(),
-    )?;
-
-    // h cmd - Set mode
-    w.write_all(b"\x1b[?25h")?; // show the cursor
-
-    w.flush()?;
-
-    Ok(())
-}
-
-fn editor_set_status_message(msg: &str) {
-    unsafe {
-        ECFG.statusmsg = msg.to_owned();
-        ECFG.statusmsg_t = SystemTime::now();
-    }
-}
-
-// input
-
 fn dyn_fmt<T: Display>(fmt_str: &str, args: &[T]) -> String {
     let mut s = String::new();
     for arg in args {
@@ -706,171 +136,504 @@ fn dyn_fmt<T: Display>(fmt_str: &str, args: &[T]) -> String {
     s
 }
 
-#[allow(clippy::option_map_unit_fn)]
-fn editor_prompt(prompt: &str, callback: Option<fn(&str, EditorKey)>) -> Option<String> {
-    let mut buf = String::new();
-
-    loop {
-        let msg = dyn_fmt(prompt, &[&buf]);
-        editor_set_status_message(&msg);
-        editor_refresh_screen().unwrap();
-
-        let ch = editor_read_key();
-
-        match ch {
-            EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H) => {
-                if !buf.is_empty() {
-                    buf.pop();
-                }
-            }
-            EditorKey::Char('\x1b') => {
-                editor_set_status_message("");
-                callback.map(|cb| cb(&buf, ch));
-                return None;
-            }
-            EditorKey::Char('\r') => {
-                editor_set_status_message("");
-                callback.map(|cb| cb(&buf, ch));
-                return Some(buf);
-            }
-            EditorKey::Char(c) if !c.is_control() => buf.push(c),
-            _ => {}
-        };
-
-        callback.map(|cb| cb(&buf, ch));
-    }
-}
-
-fn editor_move_cursor(key: EditorKey) {
-    unsafe {
-        let row = if ECFG.cy >= ECFG.rows.len() {
-            None
-        } else {
-            Some(&ECFG.rows[ECFG.cy])
-        };
-
-        match key {
-            EditorKey::ArrowLeft => {
-                if ECFG.cx != 0 {
-                    ECFG.cx -= 1
-                } else if ECFG.cy > 0 {
-                    ECFG.cy -= 1;
-                    ECFG.cx = ECFG.rows[ECFG.cy].size();
-                }
-            }
-            EditorKey::ArrowRight => {
-                if let Some(row) = row {
-                    match ECFG.cx.cmp(&row.size()) {
-                        std::cmp::Ordering::Less => ECFG.cx += 1,
-                        std::cmp::Ordering::Equal => {
-                            ECFG.cy += 1;
-                            ECFG.cx = 0;
-                        }
-                        std::cmp::Ordering::Greater => {}
-                    }
-                }
-            }
-            EditorKey::ArrowUp => ECFG.cy = ECFG.cy.saturating_sub(1),
-            EditorKey::ArrowDown if ECFG.cy < ECFG.rows.len() => ECFG.cy += 1,
-            _ => {}
-        }
-
-        // snap cursor to end of line
-
-        let row = if ECFG.cy >= ECFG.rows.len() {
-            None
-        } else {
-            Some(&ECFG.rows[ECFG.cy])
-        };
-        let rowlen = if let Some(row) = row { row.size() } else { 0 };
-        if ECFG.cx > rowlen {
-            ECFG.cx = rowlen;
-        }
-    }
-}
-
 const CTRL_F: char = ctrl_key('f');
 const CTRL_H: char = ctrl_key('h');
 const CTRL_L: char = ctrl_key('l');
 const CTRL_Q: char = ctrl_key('q');
 const CTRL_S: char = ctrl_key('s');
 
-fn editor_process_keypress() {
-    match editor_read_key() {
-        EditorKey::Char('\r') => editor_insert_newline(),
-        EditorKey::Char(CTRL_Q) => {
-            unsafe {
-                if ECFG.dirty > 0 && !ECFG.quit {
-                    editor_set_status_message(
-                        "WARNING!!! File has unsaved changes. Press Ctrl-Q once more to quit.",
-                    );
-                    ECFG.quit = true;
-                    return;
+impl Editor {
+    fn new() -> Self {
+        Self {
+            screenrows: 0,
+            screencols: 0,
+            cx: 0,
+            cy: 0,
+            rx: 0,
+            row_offset: 0,
+            col_offset: 0,
+            rows: Vec::new(),
+            filename: None,
+            statusmsg: String::new(),
+            statusmsg_t: UNIX_EPOCH,
+            dirty: 0,
+            quit: false,
+            last_match: -1,
+            direction: 1,
+        }
+    }
+
+    fn init(&mut self) -> io::Result<()> {
+        (self.screenrows, self.screencols) = get_window_size()?;
+        // assign 2 lines on the screen for the status bar
+        self.screenrows -= 2;
+        Ok(())
+    }
+
+    fn open_file(&mut self, path: &Path) {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) => die("Could not open file", e),
+        };
+        self.filename = path
+            .file_name()
+            .map(|os_str| os_str.to_str().unwrap().to_owned());
+        let reader = BufReader::new(file);
+        for (i, line) in reader.lines().enumerate() {
+            self.rows.push(Line {
+                chars: line.unwrap().chars().collect(),
+                render: vec![],
+            });
+            self.rows[i].update();
+        }
+    }
+
+    fn save_file(&mut self) {
+        let fname = match &self.filename {
+            Some(fname) => fname,
+            None => {
+                self.filename = self.prompt("Save as: {} (ESC to cancel)", None);
+                match &self.filename {
+                    Some(fname) => fname,
+                    None => {
+                        self.set_status_message("Save aborted");
+                        return;
+                    }
                 }
             }
-            editor_clear_screen();
-            exit(0);
-        }
-        EditorKey::Char(CTRL_S) => editor_save(),
-        EditorKey::Char(CTRL_F) => editor_find(),
-        c @ (EditorKey::PageUp | EditorKey::PageDown) => unsafe {
-            if c == EditorKey::PageUp {
-                ECFG.cy = ECFG.row_offset
+        };
+
+        let contents = self
+            .rows
+            .iter()
+            .flat_map(|ln| ln.chars.iter().chain(std::iter::once(&'\n')))
+            .collect::<String>();
+        let path = Path::new(fname);
+        match fs::write(path, &contents) {
+            Ok(_) => {
+                self.set_status_message(&format!("{} bytes written to disk", contents.len()));
+                self.dirty = 0;
+            }
+            Err(e) => self.set_status_message(&format!("Can't save! I/O error: {}", e)),
+        };
+    }
+
+    fn refresh_screen(&mut self) -> io::Result<()> {
+        self.scroll();
+
+        let mut w = io::BufWriter::new(io::stdout());
+
+        // l cmd - Reset mode
+        w.write_all(b"\x1b[?25l")?; // hide the cursor
+        w.write_all(b"\x1b[H")?; // reposition cursor to default position (1,1)
+
+        self.draw_rows(&mut w)?;
+        self.draw_status_bar(&mut w)?;
+
+        w.write_all(
+            format!(
+                "\x1b[{};{}H",
+                (self.cy - self.row_offset) + 1,
+                (self.rx - self.col_offset) + 1
+            )
+            .as_bytes(),
+        )?;
+
+        // h cmd - Set mode
+        w.write_all(b"\x1b[?25h")?; // show the cursor
+
+        w.flush()?;
+
+        Ok(())
+    }
+
+    fn draw_rows(&self, w: &mut BufWriter<Stdout>) -> io::Result<()> {
+        let (rows, cols) = (self.screenrows, self.screencols);
+        let numrows = self.rows.len();
+        let (row_offset, col_offset) = (self.row_offset, self.col_offset);
+
+        for y in 0..rows {
+            let filerow = y + row_offset;
+            if filerow >= numrows {
+                if numrows == 0 && y == rows / 3 {
+                    let mut welcome_msg = format!("Kilo editor -- version {}", KILO_VERSION);
+                    welcome_msg.truncate(cols);
+
+                    let padding_len = (cols - welcome_msg.len()) / 2;
+                    if padding_len > 0 {
+                        w.write_all(b"~")?;
+                        w.write_all(" ".repeat(padding_len - 1).as_bytes())?;
+                    }
+
+                    w.write_all(welcome_msg.as_bytes())?;
+                } else {
+                    w.write_all(b"~")?;
+                }
             } else {
-                ECFG.cy = ECFG.row_offset + ECFG.screenrows - 1;
-                if ECFG.cy > ECFG.rows.len() {
-                    ECFG.cy = ECFG.rows.len()
-                };
+                let r = &self.rows[filerow];
+                let len = r.rsize().saturating_sub(col_offset).clamp(0, cols);
+                let start = if len == 0 { 0 } else { col_offset };
+                let end = start + len;
+                w.write_all(r.render[start..end].iter().collect::<String>().as_bytes())?;
             }
 
-            let times = ECFG.screenrows;
-            let movement = if c == EditorKey::PageUp {
-                EditorKey::ArrowUp
+            // K cmd - Erase in Line (erases part of current line)
+            // default arg is 0 which erases the part of the line to the right of the cursor.
+            w.write_all(b"\x1b[K")?;
+            w.write_all(b"\r\n")?;
+        }
+
+        Ok(())
+    }
+
+    fn draw_status_bar(&self, w: &mut BufWriter<Stdout>) -> io::Result<()> {
+        // m cmd - Select Graphic Rendition
+        // arg 7 corresponds to inverted colors
+        w.write_all(b"\x1b[7m")?;
+        let fname = match &self.filename {
+            Some(fname) => fname,
+            None => "[No Name]",
+        };
+
+        let cols = self.screencols;
+        let status = format!(
+            "{:.20} - {} lines {}",
+            fname,
+            self.rows.len(),
+            if self.dirty > 0 { "(modified)" } else { "" }
+        );
+        let mut len = min(cols, status.len());
+        let rstatus = format!("{}:{}", self.cy + 1, self.cx + 1);
+        let rlen = rstatus.len();
+
+        w.write_all(status[..len].as_bytes())?;
+
+        while len < cols {
+            if cols - len == rlen {
+                w.write_all(rstatus[..rlen].as_bytes())?;
+                break;
             } else {
-                EditorKey::ArrowDown
+                w.write_all(b" ")?;
+                len += 1;
+            }
+        }
+
+        w.write_all(b"\x1b[m")?; // switch back to normal formatting
+
+        w.write_all(b"\r\n")?;
+
+        // message_bar
+        w.write_all(b"\x1b[K")?;
+        let msglen = min(self.statusmsg.len(), self.screencols);
+
+        if msglen > 0
+            && SystemTime::now()
+                .duration_since(self.statusmsg_t)
+                .unwrap()
+                .as_secs()
+                < 5
+        {
+            w.write_all(self.statusmsg.as_bytes())?;
+        }
+
+        Ok(())
+    }
+
+    fn process_keypress(&mut self) {
+        match editor_read_key() {
+            EditorKey::Char('\r') => self.insert_newline(),
+            EditorKey::Char(CTRL_Q) => {
+                if self.dirty > 0 && !self.quit {
+                    self.set_status_message(
+                        "WARNING!!! File has unsaved changes. Press Ctrl-Q once more to quit.",
+                    );
+                    self.quit = true;
+                    return;
+                }
+                clear_screen();
+                exit(0);
+            }
+            EditorKey::Char(CTRL_S) => self.save_file(),
+            EditorKey::Char(CTRL_F) => self.find(),
+            c @ (EditorKey::PageUp | EditorKey::PageDown) => {
+                if c == EditorKey::PageUp {
+                    self.cy = self.row_offset
+                } else {
+                    self.cy = self.row_offset + self.screenrows - 1;
+                    if self.cy > self.rows.len() {
+                        self.cy = self.rows.len()
+                    };
+                }
+
+                let times = self.screenrows;
+                let movement = if c == EditorKey::PageUp {
+                    EditorKey::ArrowUp
+                } else {
+                    EditorKey::ArrowDown
+                };
+
+                for _ in 0..times {
+                    self.move_cursor(movement);
+                }
+            }
+            c @ (EditorKey::ArrowUp
+            | EditorKey::ArrowDown
+            | EditorKey::ArrowLeft
+            | EditorKey::ArrowRight) => self.move_cursor(c),
+            EditorKey::Home => self.cx = 0,
+            EditorKey::End => {
+                if self.cy < self.rows.len() {
+                    self.cx = self.rows[self.cy].size();
+                }
+            }
+            c @ (EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H)) => {
+                // Delete is triggered through fn + delete on the Mac keyboard
+                if c == EditorKey::Delete {
+                    self.move_cursor(EditorKey::ArrowRight);
+                }
+                self.del_char();
+            }
+            EditorKey::Char('\x1b') | EditorKey::Char(CTRL_L) => {}
+            EditorKey::Char(c) => self.insert_char(c),
+        }
+
+        self.quit = false;
+    }
+
+    fn move_cursor(&mut self, key: EditorKey) {
+        let row = if self.cy >= self.rows.len() {
+            None
+        } else {
+            Some(&self.rows[self.cy])
+        };
+
+        match key {
+            EditorKey::ArrowLeft => {
+                if self.cx != 0 {
+                    self.cx -= 1
+                } else if self.cy > 0 {
+                    self.cy -= 1;
+                    self.cx = self.rows[self.cy].size();
+                }
+            }
+            EditorKey::ArrowRight => {
+                if let Some(row) = row {
+                    match self.cx.cmp(&row.size()) {
+                        std::cmp::Ordering::Less => self.cx += 1,
+                        std::cmp::Ordering::Equal => {
+                            self.cy += 1;
+                            self.cx = 0;
+                        }
+                        std::cmp::Ordering::Greater => {}
+                    }
+                }
+            }
+            EditorKey::ArrowUp => self.cy = self.cy.saturating_sub(1),
+            EditorKey::ArrowDown if self.cy < self.rows.len() => self.cy += 1,
+            _ => {}
+        }
+
+        // snap cursor to end of line
+
+        let row = if self.cy >= self.rows.len() {
+            None
+        } else {
+            Some(&self.rows[self.cy])
+        };
+        let rowlen = if let Some(row) = row { row.size() } else { 0 };
+        if self.cx > rowlen {
+            self.cx = rowlen;
+        }
+    }
+
+    fn scroll(&mut self) {
+        let (cx, cy) = (self.cx, self.cy);
+        let (rows, cols) = (self.screenrows, self.screencols);
+
+        self.rx = if cy < self.rows.len() {
+            self.rows[cy].cx_to_rx(cx)
+        } else {
+            0
+        };
+
+        let rx = self.rx;
+
+        if cy < self.row_offset {
+            self.row_offset = cy;
+        }
+        if cy >= self.row_offset + rows {
+            self.row_offset = cy - rows + 1
+        }
+
+        if rx < self.col_offset {
+            self.col_offset = rx
+        }
+        if rx >= self.col_offset + cols {
+            self.col_offset = rx - cols + 1
+        }
+    }
+
+    fn insert_row(&mut self, at: usize, row: Vec<char>) {
+        if at > self.rows.len() {
+            return;
+        }
+        self.rows.insert(
+            at,
+            Line {
+                chars: row,
+                render: vec![],
+            },
+        );
+        self.rows[at].update();
+        self.dirty += 1;
+    }
+
+    fn insert_char(&mut self, c: char) {
+        if self.cy == self.rows.len() {
+            self.insert_row(self.rows.len(), vec![]);
+        }
+        self.rows[self.cy].chars.insert(self.cx, c);
+        self.rows[self.cy].update();
+        self.cx += 1;
+        self.dirty += 1;
+    }
+
+    fn insert_newline(&mut self) {
+        if self.cx == 0 {
+            self.insert_row(self.cy, vec![]);
+        } else {
+            let row = self.rows[self.cy].clone();
+            self.insert_row(self.cy + 1, row.chars[self.cx..].to_vec());
+            self.rows[self.cy].chars = row.chars[..self.cx].to_vec();
+            self.rows[self.cy].update();
+        }
+        self.cy += 1;
+        self.cx = 0;
+    }
+
+    fn del_char(&mut self) {
+        if self.cy == self.rows.len() || (self.cx == 0 && self.cy == 0) {
+            return;
+        }
+
+        let row = &mut self.rows[self.cy];
+        if self.cx > 0 {
+            let pos = self.cx - 1;
+            if pos >= row.size() {
+                return;
+            }
+            row.chars.remove(pos);
+            row.update();
+            self.cx -= 1
+        } else {
+            self.cx = self.rows[self.cy - 1].size();
+            let mut row = self.rows[self.cy].chars.clone();
+            self.rows[self.cy - 1].chars.append(&mut row);
+            self.rows[self.cy - 1].update();
+            self.rows.remove(self.cy);
+            self.cy -= 1;
+        }
+        self.dirty += 1;
+    }
+
+    #[allow(clippy::option_map_unit_fn)]
+    fn prompt(&mut self, prompt: &str, callback: Option<&str>) -> Option<String> {
+        let mut buf = String::new();
+
+        loop {
+            let msg = dyn_fmt(prompt, &[&buf]);
+            self.set_status_message(&msg);
+            self.refresh_screen().unwrap();
+
+            let ch = editor_read_key();
+
+            match ch {
+                EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H) => {
+                    if !buf.is_empty() {
+                        buf.pop();
+                    }
+                }
+                EditorKey::Char('\x1b') => {
+                    self.set_status_message("");
+                    callback.map(|cb| self.run_callback(cb, &buf, ch));
+                    return None;
+                }
+                EditorKey::Char('\r') => {
+                    self.set_status_message("");
+                    callback.map(|cb| self.run_callback(cb, &buf, ch));
+                    return Some(buf);
+                }
+                EditorKey::Char(c) if !c.is_control() => buf.push(c),
+                _ => {}
             };
 
-            for _ in 0..times {
-                editor_move_cursor(movement);
-            }
-        },
-        c @ (EditorKey::ArrowUp
-        | EditorKey::ArrowDown
-        | EditorKey::ArrowLeft
-        | EditorKey::ArrowRight) => editor_move_cursor(c),
-        EditorKey::Home => unsafe {
-            ECFG.cx = 0;
-        },
-        EditorKey::End => unsafe {
-            if ECFG.cy < ECFG.rows.len() {
-                ECFG.cx = ECFG.rows[ECFG.cy].size();
-            }
-        },
-        c @ (EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H)) => {
-            // Delete is triggered through fn + delete on the Mac keyboard
-            if c == EditorKey::Delete {
-                editor_move_cursor(EditorKey::ArrowRight);
-            }
-            editor_del_char();
+            callback.map(|cb| self.run_callback(cb, &buf, ch));
         }
-        EditorKey::Char('\x1b') | EditorKey::Char(CTRL_L) => {}
-        EditorKey::Char(c) => editor_insert_char(c),
     }
 
-    unsafe {
-        ECFG.quit = false;
-    }
-}
+    fn find(&mut self) {
+        let (cx, cy, coloff, rowoff) = (self.cx, self.cy, self.col_offset, self.row_offset);
 
-// init
-
-fn init_editor() -> io::Result<()> {
-    unsafe {
-        (ECFG.screenrows, ECFG.screencols) = get_window_size()?;
-        // assign 2 lines on the screen for the status bar
-        ECFG.screenrows -= 2;
+        if self
+            .prompt("Search: {} (ESC/Arrows/Enter)", Some("find"))
+            .is_none()
+        {
+            (self.cx, self.cy) = (cx, cy);
+            (self.col_offset, self.row_offset) = (coloff, rowoff);
+        };
     }
-    Ok(())
+
+    fn find_cb(&mut self, query: &str, key: EditorKey) {
+        match key {
+            EditorKey::Char('\r') | EditorKey::Char('\x1b') => {
+                self.last_match = -1;
+                self.direction = 1;
+                return;
+            }
+            EditorKey::ArrowRight | EditorKey::ArrowDown => self.direction = 1,
+            EditorKey::ArrowLeft | EditorKey::ArrowUp => self.direction = -1,
+            _ => {
+                self.last_match = -1;
+                self.direction = 1;
+            }
+        };
+
+        if self.last_match == -1 {
+            self.direction = 1;
+        }
+
+        let mut current = self.last_match;
+
+        for _ in 0..self.rows.len() {
+            current += self.direction;
+            if current == -1 {
+                current = self.rows.len() as i8 - 1;
+            } else if current == self.rows.len() as i8 {
+                current = 0;
+            }
+
+            let row = &self.rows[current as usize];
+            let s = row.render.iter().collect::<String>();
+            if let Some(xidx) = s.find(query) {
+                self.last_match = current;
+                self.cy = current as usize;
+                self.cx = row.rx_to_cx(xidx);
+                self.row_offset = self.rows.len();
+                break;
+            }
+        }
+    }
+
+    fn run_callback(&mut self, callback_name: &str, query: &str, key: EditorKey) {
+        if let "find" = callback_name {
+            self.find_cb(query, key)
+        }
+    }
+
+    fn set_status_message(&mut self, msg: &str) {
+        self.statusmsg = msg.to_owned();
+        self.statusmsg_t = SystemTime::now();
+    }
 }
 
 fn main() {
@@ -879,19 +642,20 @@ fn main() {
     if let Err(e) = enable_raw_mode() {
         die("Failed to enable raw mode", e);
     };
-    if let Err(e) = init_editor() {
+    let mut editor = Editor::new();
+    if let Err(e) = editor.init() {
         die("Failed to get window size", e)
     };
 
     if args.len() >= 2 {
         let path = Path::new(&args[1]);
-        editor_open(path);
+        editor.open_file(path);
     }
 
-    editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+    editor.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
     loop {
-        editor_refresh_screen().unwrap();
-        editor_process_keypress();
+        editor.refresh_screen().unwrap();
+        editor.process_keypress();
     }
 }
