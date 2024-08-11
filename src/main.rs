@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     cmp::min,
     env,
     fmt::Display,
@@ -6,6 +7,7 @@ use std::{
     io::{self, BufRead, BufReader, BufWriter, Read, Stdout, Write},
     path::Path,
     process::exit,
+    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,6 +22,17 @@ const KILO_VERSION: &str = "0.0.1";
 struct Editor {
     screenrows: usize,
     screencols: usize,
+    statusmsg: String,
+    statusmsg_t: SystemTime,
+    quit: bool,
+    tabs: Vec<Rc<RefCell<Tab>>>,
+    tab: Option<Rc<RefCell<Tab>>>,
+    tab_index: usize,
+}
+
+struct Tab {
+    screenrows: usize,
+    screencols: usize,
     /// Cursor X coordinate (for chars)
     cx: usize,
     /// Cursor Y coordinate
@@ -30,10 +43,7 @@ struct Editor {
     col_offset: usize,
     rows: Vec<Line>,
     filename: Option<String>,
-    statusmsg: String,
-    statusmsg_t: SystemTime,
     dirty: usize,
-    quit: bool,
     last_match: i8,
     direction: i8,
 }
@@ -140,6 +150,7 @@ const CTRL_F: char = ctrl_key('f');
 const CTRL_H: char = ctrl_key('h');
 const CTRL_L: char = ctrl_key('l');
 const CTRL_Q: char = ctrl_key('q');
+const CTRL_T: char = ctrl_key('t');
 const CTRL_S: char = ctrl_key('s');
 
 impl Editor {
@@ -147,19 +158,12 @@ impl Editor {
         Self {
             screenrows: 0,
             screencols: 0,
-            cx: 0,
-            cy: 0,
-            rx: 0,
-            row_offset: 0,
-            col_offset: 0,
-            rows: Vec::new(),
-            filename: None,
             statusmsg: String::new(),
             statusmsg_t: UNIX_EPOCH,
-            dirty: 0,
             quit: false,
-            last_match: -1,
-            direction: 1,
+            tabs: Vec::new(),
+            tab: None,
+            tab_index: 0,
         }
     }
 
@@ -170,56 +174,68 @@ impl Editor {
         Ok(())
     }
 
-    fn open_file(&mut self, path: &Path) {
-        let file = match File::open(path) {
-            Ok(file) => file,
-            Err(e) => die("Could not open file", e),
-        };
-        self.filename = path
-            .file_name()
-            .map(|os_str| os_str.to_str().unwrap().to_owned());
-        let reader = BufReader::new(file);
-        for (i, line) in reader.lines().enumerate() {
-            self.rows.push(Line {
-                chars: line.unwrap().chars().collect(),
-                render: vec![],
-            });
-            self.rows[i].update();
-        }
+    fn create_tab(&mut self) {
+        let tab = Tab::new(self.screenrows, self.screencols);
+        self.tabs.push(Rc::new(RefCell::new(tab)));
+        self.set_active_tab(self.tabs.len() - 1);
+    }
+
+    fn set_active_tab(&mut self, index: usize) {
+        self.tab = Some(Rc::clone(&self.tabs[index]));
+        self.tab_index = index;
     }
 
     fn save_file(&mut self) {
-        let fname = match &self.filename {
-            Some(fname) => fname,
-            None => {
-                self.filename = self.prompt("Save as: {} (ESC to cancel)", None);
-                match &self.filename {
-                    Some(fname) => fname,
+        let fname = {
+            let fname = match self.tab.as_ref() {
+                Some(v) => v.borrow().filename.clone(),
+                None => return,
+            };
+
+            match fname {
+                Some(fname) => fname,
+                None => match self.prompt("Save as: {} (ESC to cancel)", None) {
+                    Some(fname) => {
+                        self.tab.as_ref().unwrap().borrow_mut().filename = Some(fname.clone());
+                        fname
+                    }
                     None => {
                         self.set_status_message("Save aborted");
                         return;
                     }
-                }
+                },
             }
         };
 
         let contents = self
+            .tab
+            .as_ref()
+            .unwrap()
+            .borrow()
             .rows
             .iter()
             .flat_map(|ln| ln.chars.iter().chain(std::iter::once(&'\n')))
             .collect::<String>();
-        let path = Path::new(fname);
-        match fs::write(path, &contents) {
+
+        match fs::write(Path::new(&fname), &contents) {
             Ok(_) => {
                 self.set_status_message(&format!("{} bytes written to disk", contents.len()));
-                self.dirty = 0;
+                self.tab.as_ref().unwrap().borrow_mut().dirty = 0;
             }
             Err(e) => self.set_status_message(&format!("Can't save! I/O error: {}", e)),
         };
     }
 
     fn refresh_screen(&mut self) -> io::Result<()> {
-        self.scroll();
+        let x = Rc::new(RefCell::new(Tab::new(0, 0))); // todo: improve
+
+        let tab = match self.tab.as_ref() {
+            Some(v) => {
+                v.borrow_mut().scroll();
+                v.borrow()
+            }
+            None => x.borrow(),
+        };
 
         let mut w = io::BufWriter::new(io::stdout());
 
@@ -227,14 +243,14 @@ impl Editor {
         w.write_all(b"\x1b[?25l")?; // hide the cursor
         w.write_all(b"\x1b[H")?; // reposition cursor to default position (1,1)
 
-        self.draw_rows(&mut w)?;
-        self.draw_status_bar(&mut w)?;
+        self.draw_rows(&mut w, &tab)?;
+        self.draw_status_bar(&mut w, &tab)?;
 
         w.write_all(
             format!(
                 "\x1b[{};{}H",
-                (self.cy - self.row_offset) + 1,
-                (self.rx - self.col_offset) + 1
+                (tab.cy - tab.row_offset) + 1,
+                (tab.rx - tab.col_offset) + 1
             )
             .as_bytes(),
         )?;
@@ -247,10 +263,10 @@ impl Editor {
         Ok(())
     }
 
-    fn draw_rows(&self, w: &mut BufWriter<Stdout>) -> io::Result<()> {
+    fn draw_rows(&self, w: &mut BufWriter<Stdout>, tab: &Tab) -> io::Result<()> {
         let (rows, cols) = (self.screenrows, self.screencols);
-        let numrows = self.rows.len();
-        let (row_offset, col_offset) = (self.row_offset, self.col_offset);
+        let numrows = tab.rows.len();
+        let (row_offset, col_offset) = (tab.row_offset, tab.col_offset);
 
         for y in 0..rows {
             let filerow = y + row_offset;
@@ -270,7 +286,7 @@ impl Editor {
                     w.write_all(b"~")?;
                 }
             } else {
-                let r = &self.rows[filerow];
+                let r = &tab.rows[filerow];
                 let len = r.rsize().saturating_sub(col_offset).clamp(0, cols);
                 let start = if len == 0 { 0 } else { col_offset };
                 let end = start + len;
@@ -286,11 +302,11 @@ impl Editor {
         Ok(())
     }
 
-    fn draw_status_bar(&self, w: &mut BufWriter<Stdout>) -> io::Result<()> {
+    fn draw_status_bar(&self, w: &mut BufWriter<Stdout>, tab: &Tab) -> io::Result<()> {
         // m cmd - Select Graphic Rendition
         // arg 7 corresponds to inverted colors
         w.write_all(b"\x1b[7m")?;
-        let fname = match &self.filename {
+        let fname = match &tab.filename {
             Some(fname) => fname,
             None => "[No Name]",
         };
@@ -299,11 +315,11 @@ impl Editor {
         let status = format!(
             "{:.20} - {} lines {}",
             fname,
-            self.rows.len(),
-            if self.dirty > 0 { "(modified)" } else { "" }
+            tab.rows.len(),
+            if tab.dirty > 0 { "(modified)" } else { "" }
         );
         let mut len = min(cols, status.len());
-        let rstatus = format!("{}:{}", self.cy + 1, self.cx + 1);
+        let rstatus = format!("{}:{}", tab.cy + 1, tab.cx + 1);
         let rlen = rstatus.len();
 
         w.write_all(status[..len].as_bytes())?;
@@ -341,11 +357,11 @@ impl Editor {
 
     fn process_keypress(&mut self) {
         match editor_read_key() {
-            EditorKey::Char('\r') => self.insert_newline(),
             EditorKey::Char(CTRL_Q) => {
-                if self.dirty > 0 && !self.quit {
+                let dirty = &self.tabs.iter().any(|t| t.borrow().dirty > 0);
+                if *dirty && !self.quit {
                     self.set_status_message(
-                        "WARNING!!! File has unsaved changes. Press Ctrl-Q once more to quit.",
+                        "WARNING!!! There are unsaved files. Press Ctrl-Q once more to quit.",
                     );
                     self.quit = true;
                     return;
@@ -353,8 +369,126 @@ impl Editor {
                 clear_screen();
                 exit(0);
             }
-            EditorKey::Char(CTRL_S) => self.save_file(),
+            EditorKey::Char(CTRL_T) => self.set_active_tab((self.tab_index + 1) % self.tabs.len()),
             EditorKey::Char(CTRL_F) => self.find(),
+            EditorKey::Char(CTRL_S) => self.save_file(),
+            key => {
+                if let Some(v) = self.tab.as_ref() {
+                    v.borrow_mut().process_buffer_keypress(key)
+                }
+            }
+        }
+
+        self.quit = false;
+    }
+
+    #[allow(clippy::option_map_unit_fn)]
+    fn prompt(&mut self, prompt: &str, callback: Option<&str>) -> Option<String> {
+        let mut buf = String::new();
+
+        loop {
+            let msg = dyn_fmt(prompt, &[&buf]);
+            self.set_status_message(&msg);
+            self.refresh_screen().unwrap();
+
+            let ch = editor_read_key();
+
+            match ch {
+                EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H) => {
+                    if !buf.is_empty() {
+                        buf.pop();
+                    }
+                }
+                EditorKey::Char('\x1b') => {
+                    self.set_status_message("");
+                    callback.map(|cb| self.run_callback(cb, &buf, ch));
+                    return None;
+                }
+                EditorKey::Char('\r') => {
+                    self.set_status_message("");
+                    callback.map(|cb| self.run_callback(cb, &buf, ch));
+                    return Some(buf);
+                }
+                EditorKey::Char(c) if !c.is_control() => buf.push(c),
+                _ => {}
+            };
+
+            callback.map(|cb| self.run_callback(cb, &buf, ch));
+        }
+    }
+
+    fn find(&mut self) {
+        let (cx, cy, coloff, rowoff) = match &self.tab {
+            Some(v) => {
+                let tab = v.borrow();
+                (tab.cx, tab.cy, tab.col_offset, tab.row_offset)
+            }
+            None => return,
+        };
+
+        if self
+            .prompt("Search: {} (ESC/Arrows/Enter)", Some("find"))
+            .is_none()
+        {
+            let mut tab = self.tab.as_ref().unwrap().borrow_mut();
+            (tab.cx, tab.cy) = (cx, cy);
+            (tab.col_offset, tab.row_offset) = (coloff, rowoff);
+        };
+    }
+
+    fn run_callback(&self, callback_name: &str, query: &str, key: EditorKey) {
+        if let "find" = callback_name {
+            if let Some(t) = self.tab.as_ref() {
+                t.borrow_mut().find_cb(query, key)
+            }
+        }
+    }
+
+    fn set_status_message(&mut self, msg: &str) {
+        self.statusmsg = msg.to_owned();
+        self.statusmsg_t = SystemTime::now();
+    }
+}
+
+impl Tab {
+    fn new(screenrows: usize, screencols: usize) -> Self {
+        Self {
+            screenrows,
+            screencols,
+            cx: 0,
+            cy: 0,
+            rx: 0,
+            row_offset: 0,
+            col_offset: 0,
+            rows: Vec::new(),
+            filename: None,
+            dirty: 0,
+            last_match: -1,
+            direction: 1,
+        }
+    }
+
+    fn load_file(&mut self, path: &Path) {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) => die("Could not open file", e),
+        };
+        self.filename = path
+            .file_name()
+            .map(|os_str| os_str.to_str().unwrap().to_owned());
+        let reader = BufReader::new(file);
+        for (i, line) in reader.lines().enumerate() {
+            self.rows.push(Line {
+                chars: line.unwrap().chars().collect(),
+                render: vec![],
+            });
+            self.rows[i].update();
+        }
+    }
+
+    fn process_buffer_keypress(&mut self, key: EditorKey) {
+        match key {
+            EditorKey::Char('\r') => self.insert_newline(),
             c @ (EditorKey::PageUp | EditorKey::PageDown) => {
                 if c == EditorKey::PageUp {
                     self.cy = self.row_offset
@@ -396,8 +530,6 @@ impl Editor {
             EditorKey::Char('\x1b') | EditorKey::Char(CTRL_L) => {}
             EditorKey::Char(c) => self.insert_char(c),
         }
-
-        self.quit = false;
     }
 
     fn move_cursor(&mut self, key: EditorKey) {
@@ -536,53 +668,6 @@ impl Editor {
         self.dirty += 1;
     }
 
-    #[allow(clippy::option_map_unit_fn)]
-    fn prompt(&mut self, prompt: &str, callback: Option<&str>) -> Option<String> {
-        let mut buf = String::new();
-
-        loop {
-            let msg = dyn_fmt(prompt, &[&buf]);
-            self.set_status_message(&msg);
-            self.refresh_screen().unwrap();
-
-            let ch = editor_read_key();
-
-            match ch {
-                EditorKey::Delete | EditorKey::Backspace | EditorKey::Char(CTRL_H) => {
-                    if !buf.is_empty() {
-                        buf.pop();
-                    }
-                }
-                EditorKey::Char('\x1b') => {
-                    self.set_status_message("");
-                    callback.map(|cb| self.run_callback(cb, &buf, ch));
-                    return None;
-                }
-                EditorKey::Char('\r') => {
-                    self.set_status_message("");
-                    callback.map(|cb| self.run_callback(cb, &buf, ch));
-                    return Some(buf);
-                }
-                EditorKey::Char(c) if !c.is_control() => buf.push(c),
-                _ => {}
-            };
-
-            callback.map(|cb| self.run_callback(cb, &buf, ch));
-        }
-    }
-
-    fn find(&mut self) {
-        let (cx, cy, coloff, rowoff) = (self.cx, self.cy, self.col_offset, self.row_offset);
-
-        if self
-            .prompt("Search: {} (ESC/Arrows/Enter)", Some("find"))
-            .is_none()
-        {
-            (self.cx, self.cy) = (cx, cy);
-            (self.col_offset, self.row_offset) = (coloff, rowoff);
-        };
-    }
-
     fn find_cb(&mut self, query: &str, key: EditorKey) {
         match key {
             EditorKey::Char('\r') | EditorKey::Char('\x1b') => {
@@ -623,17 +708,6 @@ impl Editor {
             }
         }
     }
-
-    fn run_callback(&mut self, callback_name: &str, query: &str, key: EditorKey) {
-        if let "find" = callback_name {
-            self.find_cb(query, key)
-        }
-    }
-
-    fn set_status_message(&mut self, msg: &str) {
-        self.statusmsg = msg.to_owned();
-        self.statusmsg_t = SystemTime::now();
-    }
 }
 
 fn main() {
@@ -648,8 +722,16 @@ fn main() {
     };
 
     if args.len() >= 2 {
-        let path = Path::new(&args[1]);
-        editor.open_file(path);
+        for path in &args[1..] {
+            editor.create_tab();
+            editor
+                .tab
+                .as_ref()
+                .unwrap()
+                .borrow_mut()
+                .load_file(Path::new(path));
+        }
+        editor.set_active_tab(0);
     }
 
     editor.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
